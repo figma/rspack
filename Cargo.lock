@@ -5197,8 +5197,7 @@ dependencies = [
 [[package]]
 name = "rspack_sources"
 version = "0.4.22"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e58a15922f723c63a408f81a7813cfe5133578057c6b9d94e94b29b3e29f51dd"
+source = "git+https://github.com/figma/rspack-sources.git?rev=f1f5a738876400c914af83f3637cc2c061b3bfa3#f1f5a738876400c914af83f3637cc2c061b3bfa3"
 dependencies = [
  "dyn-clone",
  "memchr",
