@@ -177,13 +177,16 @@ impl Combinator {
       .collect::<FxHashMap<_, _>>();
 
     let mut chunk_sets_by_count = UkeyIndexMap::<u32, Vec<UkeySet<ChunkUkey>>>::default();
-    for chunks in chunk_sets_in_graph.values() {
+    // Sort by key for deterministic iteration order
+    let mut sorted_chunk_sets: Vec<_> = chunk_sets_in_graph.iter().collect();
+    sorted_chunk_sets.sort_by_key(|(k, _)| *k);
+    for (_, chunks) in &sorted_chunk_sets {
       let count = chunks.len();
 
       chunk_sets_by_count
         .entry(count as u32)
-        .and_modify(|set| set.push(chunks.clone()))
-        .or_insert(vec![chunks.clone()]);
+        .and_modify(|set| set.push((*chunks).clone()))
+        .or_insert(vec![(*chunks).clone()]);
     }
 
     chunk_sets_by_count.sort_keys();
@@ -222,6 +225,10 @@ impl Combinator {
           used_exports_chunks.insert(chunk_key, chunks);
           grouped_chunks_key.push(chunk_key);
         }
+        // Sort for deterministic order — the FxHashMap iteration in
+        // group_chunks_by_exports is non-deterministic, and this order
+        // flows into get_combs() which determines chunk assignment.
+        grouped_chunks_key.sort_unstable();
         Some(((*module, grouped_chunks_key), used_exports_chunks))
       })
       .unzip();
@@ -232,7 +239,10 @@ impl Combinator {
     let mut used_exports_chunk_sets_by_count =
       UkeyIndexMap::<u32, Vec<UkeySet<ChunkUkey>>>::default();
     for used_exports_chunks in used_exports_chunks {
-      for (chunk_key, chunks) in used_exports_chunks {
+      // Sort by chunk_key for deterministic iteration order
+      let mut sorted_entries: Vec<_> = used_exports_chunks.into_iter().collect();
+      sorted_entries.sort_by_key(|(k, _)| *k);
+      for (chunk_key, chunks) in sorted_entries {
         if used_exports_chunk_sets_in_graph
           .insert(chunk_key, chunks.clone())
           .is_some()
