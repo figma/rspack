@@ -3,7 +3,7 @@ name: Release Deterministic Binding
 on:
   push:
     tags:
-      - 'v*-deterministic'
+      - 'v*-deterministic*'
 
 permissions:
   contents: write
@@ -52,14 +52,16 @@ jobs:
 
       - name: Package tarball
         run: |
-          VERSION="${{ github.ref_name }}"
-          VERSION="${VERSION#v}"  # strip leading 'v'
+          TAG="${{ github.ref_name }}"
+          # Extract semver from tag (e.g., v1.7.5-deterministic-abc123 → 1.7.5)
+          SEMVER=$(echo "$TAG" | grep -oP '(?<=^v)\d+\.\d+\.\d+')
+          echo "Tag: $TAG, Semver: $SEMVER"
           mkdir -p package
           cp crates/node_binding/rspack.linux-x64-gnu.node package/
           cat > package/package.json << EOF
           {
             "name": "@rspack/binding-linux-x64-gnu",
-            "version": "${VERSION%-deterministic}",
+            "version": "${SEMVER}",
             "os": ["linux"],
             "cpu": ["x64"],
             "main": "rspack.linux-x64-gnu.node",

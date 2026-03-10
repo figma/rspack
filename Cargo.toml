@@ -505,3 +505,6 @@ regex_creation_in_loops = "warn"
 # regex
 invalid_regex = "warn"
 trivial_regex = "warn"
+
+[patch.crates-io]
+rspack_sources = { git = "https://github.com/figma/rspack-sources.git", rev = "f1f5a738876400c914af83f3637cc2c061b3bfa3" }
