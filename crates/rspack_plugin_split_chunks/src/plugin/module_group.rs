@@ -315,7 +315,10 @@ impl Combinator {
       chunk_sets_by_count.push(chunks.clone());
     }
 
-    chunk_sets_by_count.sort_unstable_by_key(|chunks| chunks.len());
+    // Tiebreak by key for deterministic order: chunk_sets_in_graph is an
+    // FxHashMap, so the iteration above is non-deterministic, and a sort
+    // by len alone leaves ties in HashMap order.
+    chunk_sets_by_count.sort_unstable_by_key(|chunks| (chunks.len(), chunks.key));
 
     self.combinations = Self::get_combinations(chunk_sets_in_graph, chunk_sets_by_count);
   }
@@ -343,12 +346,15 @@ impl Combinator {
           chunk_by_ukey,
           chunk_index_map,
         );
+        // Sort by key for deterministic order — group_chunks_by_exports
+        // iterates an FxHashMap, so the input order is non-deterministic.
+        // This order flows into get_combs() which determines chunk assignment.
+        let mut grouped_chunks: Vec<_> =
+          grouped_chunks.into_iter().filter(|c| !c.is_empty()).collect();
+        grouped_chunks.sort_unstable_by_key(|c| c.key);
         let mut grouped_chunks_key = Vec::with_capacity(grouped_chunks.len());
         let mut used_exports_chunks = Vec::with_capacity(grouped_chunks.len());
         for chunks in grouped_chunks {
-          if chunks.is_empty() {
-            continue;
-          }
           grouped_chunks_key.push(chunks.key);
           used_exports_chunks.push(chunks);
         }
@@ -372,7 +378,10 @@ impl Combinator {
       }
     }
 
-    used_exports_chunk_sets_by_count.sort_unstable_by_key(|chunks| chunks.len());
+    // Tiebreak by key — push order above is deterministic now, but the sort
+    // by len alone would still leave ties in arrival order, which is fine
+    // here but cheap to make explicit and robust to future refactors.
+    used_exports_chunk_sets_by_count.sort_unstable_by_key(|chunks| (chunks.len(), chunks.key));
 
     self.used_exports_combinations = Self::get_combinations(
       used_exports_chunk_sets_in_graph,
