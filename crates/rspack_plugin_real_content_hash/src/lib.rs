@@ -397,7 +397,9 @@ impl<'a> OrderedHashesBuilder<'a> {
   pub fn build(&self) -> (IndexSet<String>, HashMap<String, HashSet<String>>) {
     let mut ordered_hashes = IndexSet::default();
     let mut hash_dependencies = HashMap::default();
-    for hash in self.hash_to_asset_names.keys() {
+    let mut sorted_keys: Vec<_> = self.hash_to_asset_names.keys().collect();
+    sorted_keys.sort();
+    for hash in sorted_keys {
       self.add_to_ordered_hashes(
         hash,
         &mut ordered_hashes,

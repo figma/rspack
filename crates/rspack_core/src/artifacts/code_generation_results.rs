@@ -165,9 +165,13 @@ impl CodeGenerationResult {
     hash_salt: &HashSalt,
   ) {
     let mut hasher = RspackHash::with_salt(hash_function, hash_salt);
-    for (source_type, source) in self.inner.as_ref() {
+    let mut sorted_entries: Vec<_> = self.inner.iter().collect();
+    sorted_entries.sort_by_key(|(source_type, _)| source_type.to_string());
+    for (source_type, source) in sorted_entries {
       source_type.hash(&mut hasher);
-      source.hash(&mut hasher);
+      // Hash only the rendered buffer, not the full Source (which includes
+      // source maps that may contain non-deterministic sandbox paths).
+      source.buffer().hash(&mut hasher);
     }
     self.chunk_init_fragments.hash(&mut hasher);
     self.runtime_requirements.hash(&mut hasher);
@@ -393,4 +397,113 @@ pub struct CodeGenerationJob {
   pub runtime: RuntimeSpec,
   pub runtimes: Vec<RuntimeSpec>,
   pub scope: Option<ConcatenationScope>,
+}
+
+#[cfg(test)]
+mod tests {
+  use std::sync::Arc;
+
+  use rspack_hash::{HashDigest, HashFunction, HashSalt};
+  use rspack_sources::{SourceExt, SourceMap, SourceMapSource, WithoutOriginalOptions};
+
+  use super::*;
+
+  /// Creates a SourceMapSource with the given JS code and source path.
+  /// The source path simulates an absolute RBE sandbox worker path.
+  fn make_source_with_path(js_code: &str, source_path: &str) -> rspack_sources::BoxSource {
+    let source_map = SourceMap::new(
+      "AAAA",                        // mappings
+      vec![source_path.to_string()], // sources (contains the sandbox path)
+      vec![Arc::from(js_code)],      // sourcesContent
+      Vec::<String>::new(),          // names
+    );
+    SourceMapSource::new(WithoutOriginalOptions {
+      value: js_code.to_string(),
+      name: source_path.to_string(),
+      source_map,
+    })
+    .boxed()
+  }
+
+  #[test]
+  fn set_hash_is_deterministic_across_sandbox_paths() {
+    // Simulate two RBE workers building the same module. The rendered JS is
+    // identical, but the source maps embed different absolute sandbox paths
+    // (e.g., /mnt/engflow/worker/work/0/exec/ vs work/1/exec/).
+    let js_code = "console.log('hello world');";
+
+    let source_a = make_source_with_path(
+      js_code,
+      "/mnt/engflow/worker/work/0/exec/bazel-out/k8-fastbuild/bin/src/index.js",
+    );
+    let source_b = make_source_with_path(
+      js_code,
+      "/mnt/engflow/worker/work/1/exec/bazel-out/k8-fastbuild/bin/src/index.js",
+    );
+
+    let mut result_a = CodeGenerationResult::default();
+    result_a.inner.insert(SourceType::JavaScript, source_a);
+    result_a.set_hash(&HashFunction::Xxhash64, &HashDigest::Hex, &HashSalt::None);
+
+    let mut result_b = CodeGenerationResult::default();
+    result_b.inner.insert(SourceType::JavaScript, source_b);
+    result_b.set_hash(&HashFunction::Xxhash64, &HashDigest::Hex, &HashSalt::None);
+
+    assert_eq!(
+      result_a.hash, result_b.hash,
+      "set_hash() must produce identical hashes when the rendered code is the \
+       same but source maps contain different absolute paths. Source map content \
+       (which may embed build-environment-specific paths) should not influence \
+       [contenthash]."
+    );
+  }
+
+  #[test]
+  fn set_hash_differs_for_different_code() {
+    // Sanity check: different JS code SHOULD produce different hashes.
+    let source_a = make_source_with_path("console.log('hello');", "/src/a.js");
+    let source_b = make_source_with_path("console.log('world');", "/src/a.js");
+
+    let mut result_a = CodeGenerationResult::default();
+    result_a.inner.insert(SourceType::JavaScript, source_a);
+    result_a.set_hash(&HashFunction::Xxhash64, &HashDigest::Hex, &HashSalt::None);
+
+    let mut result_b = CodeGenerationResult::default();
+    result_b.inner.insert(SourceType::JavaScript, source_b);
+    result_b.set_hash(&HashFunction::Xxhash64, &HashDigest::Hex, &HashSalt::None);
+
+    assert_ne!(
+      result_a.hash, result_b.hash,
+      "set_hash() must produce different hashes when the rendered code differs."
+    );
+  }
+
+  #[test]
+  fn set_hash_is_deterministic_with_multiple_source_types() {
+    // When a module has multiple source types (e.g., JS + CSS), the hash
+    // must be the same regardless of HashMap iteration order. We insert
+    // in different orders to verify the sort in set_hash() works.
+    let js_source = make_source_with_path("var x = 1;", "/src/index.js");
+    let css_source = make_source_with_path(".a { color: red; }", "/src/index.css");
+
+    // Insert JS first, then CSS
+    let mut result_a = CodeGenerationResult::default();
+    result_a
+      .inner
+      .insert(SourceType::JavaScript, js_source.clone());
+    result_a.inner.insert(SourceType::Css, css_source.clone());
+    result_a.set_hash(&HashFunction::Xxhash64, &HashDigest::Hex, &HashSalt::None);
+
+    // Insert CSS first, then JS
+    let mut result_b = CodeGenerationResult::default();
+    result_b.inner.insert(SourceType::Css, css_source);
+    result_b.inner.insert(SourceType::JavaScript, js_source);
+    result_b.set_hash(&HashFunction::Xxhash64, &HashDigest::Hex, &HashSalt::None);
+
+    assert_eq!(
+      result_a.hash, result_b.hash,
+      "set_hash() must produce identical hashes regardless of HashMap insertion \
+       order when using multiple source types."
+    );
+  }
 }
