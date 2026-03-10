@@ -3,38 +3,63 @@ name: Release Deterministic Binding
 on:
   push:
     tags:
-      - "v*-deterministic"
+      - 'v*-deterministic'
 
 permissions:
   contents: write
 
 jobs:
-  build:
-    uses: ./.github/workflows/reusable-build-build.yml
-    with:
-      target: x86_64-unknown-linux-gnu
-      runner: '["ubuntu-latest"]'
-      profile: release
-      prefer_docker: true
-
-  release:
-    needs: build
+  build-and-release:
     runs-on: ubuntu-latest
     steps:
-      - name: Download binding artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: bindings-x86_64-unknown-linux-gnu
-          path: artifact
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build binding in Docker
+        run: |
+          docker run --rm \
+            -e CARGO_INCREMENTAL=0 \
+            -e CI=1 \
+            -v ${{ github.workspace }}:/rspack \
+            -w /rspack \
+            ghcr.io/napi-rs/napi-rs/nodejs-rust:lts-debian \
+            bash -c '
+              set -ex
+              rustup target add x86_64-unknown-linux-gnu
+              npm install -g corepack@0.31.0 --force
+              corepack enable
+              mkdir -p .cargo
+              touch .cargo/config.toml
+              echo "" >> .cargo/config.toml
+              echo "trim-paths = true" >> .cargo/config.toml
+              pnpm install --frozen-lockfile
+              cargo codegen
+              RUST_TARGET=x86_64-unknown-linux-gnu pnpm build:binding:release
+            '
+          sudo chown -R $USER:$USER .
+
+      - name: Verify glibc compatibility
+        run: |
+          objdump -T crates/node_binding/rspack.linux-x64-gnu.node \
+            | grep GLIBC_ | sed 's/.*GLIBC_/GLIBC_/' | sort -uV | tail -5
+          MAX_GLIBC=$(objdump -T crates/node_binding/rspack.linux-x64-gnu.node \
+            | grep -oP 'GLIBC_\d+\.\d+' | sort -t. -k1,1n -k2,2n | tail -1)
+          echo "Max GLIBC requirement: $MAX_GLIBC"
+          if [[ "$MAX_GLIBC" > "GLIBC_2.17" ]]; then
+            echo "ERROR: Max GLIBC $MAX_GLIBC exceeds 2.17 — binary may not work on RBE workers"
+            exit 1
+          fi
 
       - name: Package tarball
         run: |
+          VERSION="${{ github.ref_name }}"
+          VERSION="${VERSION#v}"  # strip leading 'v'
           mkdir -p package
-          cp artifact/rspack.linux-x64-gnu.node package/
-          cat > package/package.json << 'EOF'
+          cp crates/node_binding/rspack.linux-x64-gnu.node package/
+          cat > package/package.json << EOF
           {
             "name": "@rspack/binding-linux-x64-gnu",
-            "version": "${{ github.ref_name }}",
+            "version": "${VERSION%-deterministic}",
             "os": ["linux"],
             "cpu": ["x64"],
             "main": "rspack.linux-x64-gnu.node",
@@ -43,21 +68,9 @@ jobs:
             "description": "Patched rspack binding with deterministic contenthash fixes"
           }
           EOF
-          # Fix version — strip the leading 'v' from the tag
-          VERSION="${{ github.ref_name }}"
-          sed -i "s/\"version\": \".*\"/\"version\": \"${VERSION#v}\"/" package/package.json
-          # Strip leading whitespace from heredoc
           sed -i 's/^          //' package/package.json
           cat package/package.json
           tar czf rspack-binding-linux-x64-gnu-deterministic.tgz package/
-
-      - name: Verify glibc compatibility
-        run: |
-          objdump -T artifact/rspack.linux-x64-gnu.node \
-            | grep GLIBC_ | sed 's/.*GLIBC_/GLIBC_/' | sort -uV | tail -5
-          MAX_GLIBC=$(objdump -T artifact/rspack.linux-x64-gnu.node \
-            | grep -oP 'GLIBC_\d+\.\d+' | sort -t. -k1,1n -k2,2n | tail -1)
-          echo "Max GLIBC requirement: $MAX_GLIBC"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
