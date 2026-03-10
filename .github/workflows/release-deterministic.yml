@@ -1,0 +1,71 @@
+name: Release Deterministic Binding
+
+on:
+  push:
+    tags:
+      - "v*-deterministic"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    uses: ./.github/workflows/reusable-build-build.yml
+    with:
+      target: x86_64-unknown-linux-gnu
+      runner: '["ubuntu-latest"]'
+      profile: release
+      prefer_docker: true
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download binding artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: bindings-x86_64-unknown-linux-gnu
+          path: artifact
+
+      - name: Package tarball
+        run: |
+          mkdir -p package
+          cp artifact/rspack.linux-x64-gnu.node package/
+          cat > package/package.json << 'EOF'
+          {
+            "name": "@rspack/binding-linux-x64-gnu",
+            "version": "${{ github.ref_name }}",
+            "os": ["linux"],
+            "cpu": ["x64"],
+            "main": "rspack.linux-x64-gnu.node",
+            "files": ["rspack.linux-x64-gnu.node"],
+            "license": "MIT",
+            "description": "Patched rspack binding with deterministic contenthash fixes"
+          }
+          EOF
+          # Fix version — strip the leading 'v' from the tag
+          VERSION="${{ github.ref_name }}"
+          sed -i "s/\"version\": \".*\"/\"version\": \"${VERSION#v}\"/" package/package.json
+          # Strip leading whitespace from heredoc
+          sed -i 's/^          //' package/package.json
+          cat package/package.json
+          tar czf rspack-binding-linux-x64-gnu-deterministic.tgz package/
+
+      - name: Verify glibc compatibility
+        run: |
+          objdump -T artifact/rspack.linux-x64-gnu.node \
+            | grep GLIBC_ | sed 's/.*GLIBC_/GLIBC_/' | sort -uV | tail -5
+          MAX_GLIBC=$(objdump -T artifact/rspack.linux-x64-gnu.node \
+            | grep -oP 'GLIBC_\d+\.\d+' | sort -t. -k1,1n -k2,2n | tail -1)
+          echo "Max GLIBC requirement: $MAX_GLIBC"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: rspack-binding-linux-x64-gnu-deterministic.tgz
+          body: |
+            Patched `@rspack/binding-linux-x64-gnu` with deterministic contenthash fixes for RBE builds.
+
+            Built with upstream's Docker image (`ghcr.io/napi-rs/napi-rs/nodejs-rust:lts-debian`) and `release` profile (fat LTO, strip, codegen-units=1).
+
+            See the `v1.7.5-deterministic` branch for the source diff against upstream v1.7.5.
