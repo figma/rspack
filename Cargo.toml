@@ -133,7 +133,7 @@ napi-derive = { version = "3.1.2", default-features = false }
 
 # Serialize and Deserialize
 inventory = { version = "0.3.17", default-features = false }
-rkyv      = { version = "=0.8.8", default-features = false, features = ["std", "bytecheck"] }
+rkyv      = { version = "=0.8.16", default-features = false, features = ["std", "bytecheck"] }
 
 # Must be pinned with the same swc versions
 pnp                 = { version = "0.12.8", default-features = false }
