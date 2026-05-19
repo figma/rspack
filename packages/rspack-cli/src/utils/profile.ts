@@ -7,14 +7,16 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { rspack } from '@rspack/core';
 
-const DEFAULT_RUST_TRACE_LAYER = 'perfetto';
+const DEFAULT_RUST_TRACE_LAYER = 'logger';
 
 export async function applyProfile(
   filterValue: string,
   traceLayer: string = DEFAULT_RUST_TRACE_LAYER,
   traceOutput?: string,
 ) {
-  const { asyncExitHook } = await import('exit-hook');
+  const { asyncExitHook } = await import(
+    /* webpackChunkName: "exit-hook" */ 'exit-hook'
+  );
 
   if (traceLayer !== 'logger' && traceLayer !== 'perfetto') {
     throw new Error(`unsupported trace layer: ${traceLayer}`);

@@ -1,15 +1,19 @@
 use rspack_cacheable::{
   cacheable, cacheable_dyn,
-  with::{AsOption, AsPreset, AsVec},
+  with::{AsCacheable, AsOption, AsVec},
 };
 use rspack_core::{
-  AsContextDependency, Dependency, DependencyCategory, DependencyCodeGeneration, DependencyId,
-  DependencyLocation, DependencyRange, DependencyTemplate, DependencyTemplateType, DependencyType,
-  ExportsInfoArtifact, ExtendedReferencedExport, FactorizeInfo, ModuleDependency, ModuleGraph,
-  ModuleGraphCacheArtifact, ReferencedExport, RuntimeSpec, TemplateContext, TemplateReplaceSource,
-  create_exports_object_referenced,
+  AsContextDependency, Dependency, DependencyCategory, DependencyCodeGeneration,
+  DependencyCondition, DependencyId, DependencyLocation, DependencyRange, DependencyTemplate,
+  DependencyTemplateType, DependencyType, ExportsInfoArtifact, ExtendedReferencedExport,
+  FactorizeInfo, ModuleDependency, ModuleGraph, ModuleGraphCacheArtifact, ReferencedSpecifier,
+  RuntimeSpec, TemplateContext, TemplateReplaceSource, create_exports_object_referenced,
+  create_referenced_exports_by_referenced_specifiers,
 };
-use swc_core::ecma::atoms::Atom;
+
+use crate::dependency::{
+  DependencyBranchGuard, DependencyBranchGuards, compose_dependency_condition,
+};
 
 #[cacheable]
 #[derive(Debug, Clone)]
@@ -20,8 +24,10 @@ pub struct CommonJsRequireDependency {
   range: DependencyRange,
   range_expr: Option<DependencyRange>,
   loc: Option<DependencyLocation>,
-  #[cacheable(with=AsOption<AsVec<AsVec<AsPreset>>>)]
-  referenced_exports: Option<Vec<Vec<Atom>>>,
+  #[cacheable(with=AsOption<AsVec<AsCacheable>>)]
+  referenced_specifiers: Option<Vec<ReferencedSpecifier>>,
+  #[cacheable(with=AsOption<AsCacheable>)]
+  branch_guards: Option<Box<DependencyBranchGuards>>,
   factorize_info: FactorizeInfo,
 }
 
@@ -32,7 +38,7 @@ impl CommonJsRequireDependency {
     range_expr: Option<DependencyRange>,
     optional: bool,
     loc: Option<DependencyLocation>,
-    referenced_exports: Option<Vec<Vec<Atom>>>,
+    referenced_specifiers: Option<Vec<ReferencedSpecifier>>,
   ) -> Self {
     Self {
       id: DependencyId::new(),
@@ -41,13 +47,18 @@ impl CommonJsRequireDependency {
       range,
       range_expr,
       loc,
-      referenced_exports,
+      referenced_specifiers,
+      branch_guards: None,
       factorize_info: Default::default(),
     }
   }
 
-  pub fn set_referenced_exports(&mut self, referenced_exports: Vec<Vec<Atom>>) {
-    self.referenced_exports = Some(referenced_exports);
+  pub fn set_referenced_specifiers(&mut self, referenced_specifiers: Vec<ReferencedSpecifier>) {
+    self.referenced_specifiers = Some(referenced_specifiers);
+  }
+
+  pub fn add_branch_guards(&mut self, guards: impl IntoIterator<Item = DependencyBranchGuard>) {
+    self.branch_guards.get_or_insert_default().extend(guards);
   }
 }
 
@@ -75,24 +86,29 @@ impl Dependency for CommonJsRequireDependency {
 
   fn get_referenced_exports(
     &self,
-    _module_graph: &ModuleGraph,
-    _module_graph_cache: &ModuleGraphCacheArtifact,
-    _exports_info_artifact: &ExportsInfoArtifact,
+    module_graph: &ModuleGraph,
+    module_graph_cache: &ModuleGraphCacheArtifact,
+    exports_info_artifact: &ExportsInfoArtifact,
     _runtime: Option<&RuntimeSpec>,
   ) -> Vec<ExtendedReferencedExport> {
-    if let Some(referenced_exports) = &self.referenced_exports {
-      return referenced_exports
-        .iter()
-        .map(|referenced_export| {
-          ExtendedReferencedExport::Export(ReferencedExport::new(
-            referenced_export.clone(),
-            false,
-            false,
-          ))
-        })
-        .collect();
+    if let Some(referenced_specifiers) = &self.referenced_specifiers {
+      let module = module_graph
+        .get_module_by_dependency_id(&self.id)
+        .expect("should have module");
+      let exports_type = module.get_exports_type(
+        module_graph,
+        module_graph_cache,
+        exports_info_artifact,
+        false,
+      );
+      create_referenced_exports_by_referenced_specifiers(
+        referenced_specifiers,
+        exports_type,
+        module.build_info().json_data.is_some(),
+      )
+    } else {
+      create_exports_object_referenced()
     }
-    create_exports_object_referenced()
   }
 
   fn could_affect_referencing_module(&self) -> rspack_core::AffectType {
@@ -112,6 +128,10 @@ impl ModuleDependency for CommonJsRequireDependency {
 
   fn get_optional(&self) -> bool {
     self.optional
+  }
+
+  fn get_condition(&self) -> Option<DependencyCondition> {
+    compose_dependency_condition(None, self.branch_guards.as_deref())
   }
 
   fn factorize_info(&self) -> &FactorizeInfo {

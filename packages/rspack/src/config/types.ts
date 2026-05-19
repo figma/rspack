@@ -251,7 +251,7 @@ export type Entry = EntryStatic | EntryDynamic;
 //#endregion
 
 //#region Output
-/** The output directory as an absolute path. */
+/** The output directory. Relative paths are resolved against `context`. */
 export type Path = string;
 
 /** Tells Rspack to include comments in bundles with information about the contained modules. */
@@ -304,7 +304,7 @@ export type OutputModule = boolean;
 /** Tell Rspack to remove a module from the module instance cache (require.cache) if it throws an exception when it is required. */
 export type StrictModuleExceptionHandling = boolean;
 
-/** Handle error in module loading as per EcmaScript Modules spec at a performance cost. */
+/** Handle error in module loading as per ECMAScript Modules spec at a performance cost. */
 export type StrictModuleErrorHandling = boolean;
 
 /** Indicates what global object will be used to mount the library. */
@@ -334,7 +334,7 @@ export type WorkerPublicPath = string;
 /** Controls [Trusted Types](https://web.dev/articles/trusted-types) compatibility. */
 export type TrustedTypes = {
   /**
-   * The name of the Trusted Types policy created by webpack to serve bundle chunks.
+   * The name of the Trusted Types policy created by Rspack to serve bundle chunks.
    */
   policyName?: string;
   /**
@@ -415,7 +415,7 @@ export type Environment = {
   /** The environment supports 'document' variable. */
   document?: boolean;
 
-  /** The environment supports an async import() function to import EcmaScript modules. */
+  /** The environment supports an async import() function to import ECMAScript modules. */
   dynamicImport?: boolean;
 
   /** The environment supports an async import() when creating a worker, only for web targets at the moment. */
@@ -438,7 +438,7 @@ export type Environment = {
 
   /**
    * Determines if the node: prefix is generated for core module imports in environments that support it.
-   * This is only applicable to Webpack runtime code.
+   * This is only applicable to Rspack runtime code.
    * */
   nodePrefixForCoreModules?: boolean;
 
@@ -451,7 +451,7 @@ export type Environment = {
 
 export type Output = {
   /**
-   * The output directory as an absolute path.
+   * The output directory. Relative paths are resolved against `context`.
    * @default path.resolve(process.cwd(), 'dist')
    * */
   path?: Path;
@@ -545,7 +545,7 @@ export type Output = {
   strictModuleExceptionHandling?: StrictModuleExceptionHandling;
 
   /**
-   * Handle error in module loading as per EcmaScript Modules spec at a performance cost.
+   * Handle error in module loading as per ECMAScript Modules spec at a performance cost.
    * @default false
    * */
   strictModuleErrorHandling?: StrictModuleErrorHandling;
@@ -821,7 +821,6 @@ export type ResolveOptions = {
 
   /**
    * A list of directories where server-relative URLs (beginning with '/') are resolved.
-   * It defaults to the context configuration option.
    * On systems other than Windows, these requests are initially resolved as an absolute path.
    * @default []
    */
@@ -831,8 +830,6 @@ export type ResolveOptions = {
   byDependency?: Record<string, ResolveOptions>;
   /** enable Yarn PnP */
   pnp?: boolean;
-  /** Path to PnP manifest file */
-  pnpManifest?: string | false;
 };
 
 /** Used to configure the Rspack module resolution */
@@ -885,8 +882,40 @@ export type RuleSetUse =
   | RuleSetUseItem[]
   | ((data: RawFuncUseCtx) => RuleSetUseItem[]);
 
+export type RuleSetRuleUseAndLoader =
+  | {
+      /** A loader name */
+      loader: RuleSetLoader;
+
+      /** A loader options */
+      options?: RuleSetLoaderOptions;
+
+      /** An array to pass the Loader package name and its options. */
+      use?: never;
+    }
+  | {
+      /** A loader name */
+      loader?: never;
+
+      /** A loader options */
+      options?: never;
+
+      /** An array to pass the Loader package name and its options. */
+      use: RuleSetUse;
+    }
+  | {
+      /** A loader name */
+      loader?: never;
+
+      /** A loader options */
+      options?: never;
+
+      /** An array to pass the Loader package name and its options. */
+      use?: never;
+    };
+
 /** Rule defines the conditions for matching a module and the behavior of handling those modules. */
-export type RuleSetRule = {
+export type RuleSetRule = RuleSetRuleUseAndLoader & {
   /** Matches all modules that match this resource, and will match against Resource. */
   test?: RuleSetCondition;
 
@@ -931,15 +960,6 @@ export type RuleSetRule = {
 
   /** Used to mark the layer of the matching module. */
   layer?: string;
-
-  /** A loader name */
-  loader?: RuleSetLoader;
-
-  /** A loader options */
-  options?: RuleSetLoaderOptions;
-
-  /** An array to pass the Loader package name and its options.  */
-  use?: RuleSetUse;
 
   /**
    * Parser options for the specific modules that matched by the rule conditions
@@ -1114,7 +1134,6 @@ export type JavascriptParserOptions = {
 
   /**
    * Enable or disable evaluating import.meta. Set to 'preserve-unknown' to preserve unknown properties for runtime evaluation.
-   * @default 'preserve-unknown'
    */
   importMeta?: boolean | 'preserve-unknown';
 
@@ -1221,6 +1240,17 @@ export type JavascriptParserOptions = {
    * @default false
    */
   deferImport?: boolean;
+
+  /**
+   * Whether to enable import.meta.resolve().
+   * @default false
+   */
+  importMetaResolve?: boolean;
+  /**
+   * Flag top-level exported functions as side-effect-free for pure-function-based tree shaking.
+   * @experimental
+   */
+  pureFunctions?: string[];
 };
 
 export type JsonParserOptions = {
@@ -1540,6 +1570,7 @@ export type ExternalsType =
   | 'promise'
   | 'import'
   | 'module-import'
+  | 'modern-module'
   | 'script'
   | 'node-commonjs'
   | 'commonjs-import';
@@ -1913,6 +1944,13 @@ export type StatsPresets =
   | 'detailed'
   | 'summary';
 
+type AssetFilterItemTypes =
+  | RegExp
+  | string
+  | ((name: string, asset: any) => boolean);
+
+type AssetFilterTypes = boolean | AssetFilterItemTypes | AssetFilterItemTypes[];
+
 type ModuleFilterItemTypes =
   | RegExp
   | string
@@ -2206,7 +2244,7 @@ export type StatsOptions = {
    * Exclude the matching assets information.
    * @default false
    */
-  excludeAssets?: ModuleFilterTypes;
+  excludeAssets?: AssetFilterTypes;
   /**
    * Specifies the sorting order for modules.
    * @default 'id'
@@ -2439,6 +2477,14 @@ type SharedOptimizationSplitChunksCacheGroup = {
 
   minSizeReduction?: OptimizationSplitChunksSizes;
 
+  /**
+   * Size threshold at which splitting is enforced and other restrictions
+   * (minRemainingSize, maxAsyncRequests, maxInitialRequests) are ignored.
+   * The value is `50000` in production mode.
+   * The value is `30000` in others mode.
+   */
+  enforceSizeThreshold?: OptimizationSplitChunksSizes;
+
   /** Maximum size, in bytes, for a chunk to be generated. */
   maxSize?: OptimizationSplitChunksSizes;
 
@@ -2541,8 +2587,10 @@ export type OptimizationSplitChunksOptions = {
 export type Optimization = {
   /**
    * Which algorithm to use when choosing module ids.
+   * Setting to `false` disables the built-in algorithm, allowing a custom plugin
+   * (e.g. HashedModuleIdsPlugin) to provide module ids instead.
    */
-  moduleIds?: 'named' | 'natural' | 'deterministic';
+  moduleIds?: false | 'named' | 'natural' | 'deterministic' | 'hashed';
 
   /**
    * Which algorithm to use when choosing chunk ids.
@@ -2583,9 +2631,6 @@ export type Optimization = {
    * @default false
    */
   runtimeChunk?: OptimizationRuntimeChunk;
-
-  /** Detect and remove modules from chunks these modules are already included in all parents. */
-  removeAvailableModules?: boolean;
 
   /**
    * Remove empty chunks generated in the compilation.
@@ -2887,6 +2932,11 @@ export type Experiments = {
    * @default false
    */
   deferImport?: boolean;
+  /**
+   * Enable pure-function-based side-effects analysis.
+   * @default false
+   */
+  pureFunctions?: boolean;
 };
 //#endregion
 
@@ -2900,14 +2950,14 @@ export type Watch = boolean;
 export type WatchOptions = {
   /**
    * Add a delay before rebuilding once the first file changed.
-   * This allows webpack to aggregate any other changes made during this time period into one rebuild.
+   * This allows Rspack to aggregate any other changes made during this time period into one rebuild.
    * @default 5
    */
   aggregateTimeout?: number;
 
   /**
    * Follow symlinks while looking for files.
-   * This is usually not needed as webpack already resolves symlinks ('resolve.symlinks' and 'resolve.alias').
+   * This is usually not needed as Rspack already resolves symlinks ('resolve.symlinks' and 'resolve.alias').
    */
   followSymlinks?: boolean;
 
@@ -2936,9 +2986,18 @@ export type WatchOptions = {
 export type DevServer = DevServerOptions;
 
 export type {
+  DevServerClient,
+  DevServerHeaders,
+  DevServerHost,
+  DevServerMiddleware,
+  DevServerMiddlewareHandler,
+  DevServerMiddlewareObject,
+  DevServerOpenOptions,
+  DevServerProxyConfigArray,
+  DevServerProxyConfigArrayItem,
   DevServerStatic,
   DevServerStaticItem,
-  Middleware as DevServerMiddleware,
+  DevServerWebSocketURL,
 } from './devServer';
 //#endregion
 
@@ -2995,13 +3054,13 @@ export type Performance =
        */
       hints?: false | 'warning' | 'error';
       /**
-       * File size limit (in bytes) when exceeded, that webpack will provide performance hints.
-       * @default 250000
+       * File size limit (in bytes) when exceeded, Rspack will provide performance hints.
+       * @default 307200 (300 KiB)
        */
       maxAssetSize?: number;
       /**
        * Total size of an entry point (in bytes).
-       * @default 250000
+       * @default 512000 (500 KiB)
        */
       maxEntrypointSize?: number;
     };
@@ -3127,7 +3186,7 @@ export type RspackOptions = {
   /**
    * Configuration for the development server.
    */
-  devServer?: DevServer;
+  devServer?: false | DevServer;
   /**
    * Options for module configuration.
    */

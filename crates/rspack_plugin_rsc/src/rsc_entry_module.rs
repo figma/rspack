@@ -1,25 +1,32 @@
-use std::borrow::Cow;
+use std::{borrow::Cow, fmt::Write, sync::Arc};
 
 use async_trait::async_trait;
-use rspack_cacheable::{cacheable, cacheable_dyn};
+use cow_utils::CowUtils;
+use rspack_cacheable::{
+  cacheable, cacheable_dyn,
+  with::{AsCacheable, AsMap, AsVec},
+};
 use rspack_collections::{Identifiable, Identifier};
 use rspack_core::{
   AsyncDependenciesBlock, AsyncDependenciesBlockIdentifier, BoxDependency, BoxModule, BuildContext,
   BuildInfo, BuildMeta, BuildMetaExportsType, BuildResult, CodeGenerationResult, Compilation,
-  Context, DependenciesBlock, Dependency, DependencyId, FactoryMeta, LibIdentOptions, Module,
-  ModuleCodeGenerationContext, ModuleDependency, ModuleGraph, ModuleIdentifier, ModuleType,
-  RuntimeSpec, SourceType, contextify, impl_module_meta_info, impl_source_map_config,
-  module_update_hash,
+  Context, DependenciesBlock, Dependency, DependencyId, DependencyRange, FactoryMeta, ImportPhase,
+  LibIdentOptions, Module, ModuleCodeGenerationContext, ModuleDependency, ModuleGraph,
+  ModuleIdentifier, ModuleLayer, ModuleType, ReferencedSpecifier, RuntimeSpec, SourceType,
+  contextify, impl_module_meta_info, impl_source_map_config, module_update_hash,
   rspack_sources::{BoxSource, RawStringSource, SourceExt},
-  to_comment,
 };
 use rspack_error::{Result, impl_empty_diagnosable_trait};
 use rspack_hash::{RspackHash, RspackHashDigest};
-use rspack_util::source_map::SourceMapKind;
-use rustc_hash::FxHashSet;
+use rspack_plugin_javascript::dependency::ImportEagerDependency;
+use rspack_util::{fx_hash::FxIndexSet, source_map::SourceMapKind};
+use rustc_hash::{FxHashMap, FxHashSet};
+use swc_core::ecma::atoms::Atom;
 
 use crate::{
-  client_reference_dependency::ClientReferenceDependency, plugin_state::ClientModuleImport,
+  client_reference_dependency::ClientReferenceDependency,
+  constants::LAYERS_NAMES,
+  plugin_state::{ClientModuleImport, CssImportsByServerEntry},
 };
 
 #[impl_source_map_config]
@@ -31,31 +38,46 @@ pub struct RscEntryModule {
   identifier: ModuleIdentifier,
   lib_ident: String,
   client_modules: Vec<ClientModuleImport>,
-  name: String,
+  #[cacheable(with=AsMap<AsCacheable, AsVec>)]
+  css_imports_by_server_entry: CssImportsByServerEntry,
+  name: Arc<str>,
+  /// When true, client modules are loaded eagerly (not as code-split points).
+  is_server_side_rendering: bool,
   factory_meta: Option<FactoryMeta>,
   build_info: BuildInfo,
   build_meta: BuildMeta,
+  layer: Option<ModuleLayer>,
 }
 
 impl RscEntryModule {
-  pub fn new(name: String, client_modules: Vec<ClientModuleImport>) -> Self {
+  pub fn new(
+    name: Arc<str>,
+    client_modules: Vec<ClientModuleImport>,
+    css_imports_by_server_entry: CssImportsByServerEntry,
+    is_server_side_rendering: bool,
+  ) -> Self {
     let lib_ident = format!("rspack/rsc-entry?name={}", &name);
-    let identifier = ModuleIdentifier::from(format!(
-      "rsc entry ({}) [{}]",
-      name,
-      client_modules
-        .iter()
-        .map(|m| m.request.as_str())
-        .collect::<Vec<_>>()
-        .join(", ")
-    ));
+    let identifier = create_identifier(
+      name.as_ref(),
+      &client_modules,
+      &css_imports_by_server_entry,
+      is_server_side_rendering,
+    );
+    let layer = if is_server_side_rendering {
+      Some(LAYERS_NAMES.server_side_rendering.to_string())
+    } else {
+      None
+    };
+
     Self {
       blocks: Vec::new(),
       dependencies: Vec::new(),
       identifier,
       lib_ident,
       client_modules,
+      css_imports_by_server_entry,
       name,
+      is_server_side_rendering,
       factory_meta: None,
       build_info: BuildInfo {
         strict: true,
@@ -67,7 +89,74 @@ impl RscEntryModule {
         ..Default::default()
       },
       source_map_kind: SourceMapKind::empty(),
+      layer,
     }
+  }
+
+  fn render_debug_comments(&self, compilation: &Compilation) -> String {
+    let module_graph = compilation.get_module_graph();
+    let referenced_exports_by_request = create_referenced_exports_by_request(&self.client_modules);
+    let mut source = String::new();
+
+    if self.is_server_side_rendering {
+      for dep_id in self.get_dependencies() {
+        let dependency = module_graph.dependency_by_id(dep_id);
+        let dep = dependency
+          .downcast_ref::<ImportEagerDependency>()
+          .unwrap_or_else(|| {
+            panic!(
+              "Expected dependency of eager RscEntryModule to be ImportEagerDependency, got {:?}",
+              dependency.dependency_type()
+            )
+          });
+        append_debug_comment_for_request(
+          &mut source,
+          referenced_exports_by_request
+            .get(dep.request())
+            .map(String::as_str),
+          compilation,
+          dep.request(),
+        );
+      }
+
+      return source;
+    }
+
+    for block_id in self.get_blocks() {
+      let block = module_graph
+        .block_by_id(block_id)
+        .expect("should have block");
+
+      for dependency_id in block.get_dependencies() {
+        let dependency = module_graph.dependency_by_id(dependency_id);
+        let dep = dependency
+          .downcast_ref::<ClientReferenceDependency>()
+          .unwrap_or_else(|| {
+            panic!(
+              "Expected dependency of RscEntryModule to be ClientReferenceDependency, got {:?}",
+              dependency.dependency_type()
+            )
+          });
+
+        append_debug_comment_for_request(
+          &mut source,
+          referenced_exports_by_request
+            .get(dep.user_request())
+            .map(String::as_str)
+            .or_else(|| {
+              self
+                .css_imports_by_server_entry
+                .values()
+                .any(|imports| imports.contains(dep.user_request()))
+                .then_some("side-effect")
+            }),
+          compilation,
+          dep.user_request(),
+        );
+      }
+    }
+
+    source
   }
 }
 
@@ -128,74 +217,104 @@ impl Module for RscEntryModule {
     Some(self.lib_ident.as_str().into())
   }
 
+  fn get_layer(&self) -> Option<&ModuleLayer> {
+    self.layer.as_ref()
+  }
+
   async fn build(
     mut self: Box<Self>,
     _build_context: BuildContext,
     _: Option<&Compilation>,
   ) -> Result<BuildResult> {
-    let mut blocks = vec![];
-    let dependencies: Vec<BoxDependency> = vec![];
+    if self.is_server_side_rendering {
+      // Eager: no code-split points; use ImportEagerDependency (CSS filtering done at call site).
+      let mut dependencies: Vec<BoxDependency> = Vec::with_capacity(self.client_modules.len());
+      for client_module in &self.client_modules {
+        let referenced_specifiers = create_referenced_specifiers(&client_module.ids);
+        let dep = ImportEagerDependency::new(
+          Atom::from(client_module.request.as_str()),
+          DependencyRange { start: 0, end: 0 },
+          referenced_specifiers,
+          None,
+          ImportPhase::Evaluation,
+        );
+        dependencies.push(Box::new(dep));
+      }
+      Ok(BuildResult {
+        module: BoxModule::new(self),
+        dependencies,
+        blocks: vec![],
+        optimization_bailouts: vec![],
+      })
+    } else {
+      // Non-eager: code-split points; use AsyncDependenciesBlock + ClientReferenceDependency.
+      let mut blocks =
+        Vec::with_capacity(self.client_modules.len() + self.css_imports_by_server_entry.len());
+      let dependencies: Vec<BoxDependency> = vec![];
 
-    for client_module in &self.client_modules {
-      let dep = ClientReferenceDependency::new(
-        client_module.request.clone(),
-        client_module.ids.iter().cloned().map(Into::into).collect(),
-      );
-      let block = AsyncDependenciesBlock::new(
-        self.identifier,
-        None,
-        None,
-        vec![Box::new(dep) as Box<dyn Dependency>],
-        Some(client_module.request.clone()),
-      );
-      blocks.push(Box::new(block));
+      for (server_entry, css_imports) in &self.css_imports_by_server_entry {
+        if css_imports.is_empty() {
+          continue;
+        }
+
+        let dependencies = css_imports
+          .iter()
+          .map(|request| {
+            Box::new(ClientReferenceDependency::new(
+              request.clone(),
+              Default::default(),
+              self.is_server_side_rendering,
+            )) as Box<dyn Dependency>
+          })
+          .collect::<Vec<_>>();
+
+        let block = AsyncDependenciesBlock::new(
+          self.identifier,
+          None,
+          Some(server_entry.as_str()),
+          dependencies,
+          Some(server_entry.clone()),
+        );
+        blocks.push(Box::new(block));
+      }
+
+      for client_module in &self.client_modules {
+        let dep = ClientReferenceDependency::new(
+          client_module.request.clone(),
+          client_module.ids.clone(),
+          self.is_server_side_rendering,
+        );
+        let block = AsyncDependenciesBlock::new(
+          self.identifier,
+          None,
+          None,
+          vec![Box::new(dep) as Box<dyn Dependency>],
+          Some(client_module.request.clone()),
+        );
+        blocks.push(Box::new(block));
+      }
+
+      Ok(BuildResult {
+        module: BoxModule::new(self),
+        dependencies,
+        blocks,
+        optimization_bailouts: vec![],
+      })
     }
-
-    Ok(BuildResult {
-      module: BoxModule::new(self),
-      dependencies,
-      blocks,
-      optimization_bailouts: vec![],
-    })
   }
 
+  // RscEntryModule is the bridge injected by the Server Compiler into the
+  // Client Compiler to connect Client Component and CSS module graphs.
+  // It never emits runtime code; code generation only writes debug comments to
+  // help diagnose RSC entry composition issues.
   async fn code_generation(
     &self,
     code_generation_context: &mut ModuleCodeGenerationContext,
   ) -> Result<CodeGenerationResult> {
-    let ModuleCodeGenerationContext { compilation, .. } = code_generation_context;
+    let compilation = code_generation_context.compilation;
+    let source = self.render_debug_comments(compilation);
 
-    let mut code_generation_result = CodeGenerationResult::default();
-    let module_graph = compilation.get_module_graph();
-
-    let mut comments = Vec::new();
-
-    for block_id in self.get_blocks() {
-      let block = module_graph
-        .block_by_id(block_id)
-        .expect("should have block");
-
-      for dependency_id in block.get_dependencies() {
-        let dependency = module_graph.dependency_by_id(dependency_id);
-        let request = dependency
-          .downcast_ref::<ClientReferenceDependency>()
-          .unwrap_or_else(|| {
-            panic!(
-              "Expected dependency of RscEntryModule to be ClientReferenceDependency, got {:?}",
-              dependency.dependency_type()
-            )
-          })
-          .user_request();
-
-        let comment = to_comment(&contextify(compilation.options.context.as_path(), request));
-        comments.push(comment);
-      }
-    }
-
-    let source = comments.join("\n");
-    code_generation_result =
-      code_generation_result.with_javascript(RawStringSource::from(source).boxed());
-    Ok(code_generation_result)
+    Ok(CodeGenerationResult::default().with_javascript(RawStringSource::from(source).boxed()))
   }
 
   async fn get_runtime_hash(
@@ -210,3 +329,133 @@ impl Module for RscEntryModule {
 }
 
 impl_empty_diagnosable_trait!(RscEntryModule);
+
+fn create_identifier(
+  name: &str,
+  client_modules: &[ClientModuleImport],
+  css_imports_by_server_entry: &CssImportsByServerEntry,
+  is_server_side_rendering: bool,
+) -> ModuleIdentifier {
+  let mut identifier = String::from("rsc entry|");
+  push_value(&mut identifier, name);
+  identifier.push('|');
+  identifier.push(if is_server_side_rendering { '1' } else { '0' });
+  identifier.push('|');
+
+  let mut client_modules = client_modules.iter().collect::<Vec<_>>();
+  client_modules.sort_unstable_by(|a, b| a.request.cmp(&b.request));
+  for client_module in client_modules {
+    push_value(&mut identifier, &client_module.request);
+    identifier.push('[');
+
+    let ids = sorted_strs(client_module.ids.iter().map(|id| id.as_str()));
+    for id in ids {
+      push_value(&mut identifier, id);
+    }
+    identifier.push(']');
+  }
+
+  identifier.push('|');
+  let mut css_imports_by_server_entry = css_imports_by_server_entry.iter().collect::<Vec<_>>();
+  css_imports_by_server_entry.sort_unstable_by_key(|(a, _)| *a);
+  for (server_entry, css_imports) in css_imports_by_server_entry {
+    push_value(&mut identifier, server_entry);
+    identifier.push('[');
+
+    let css_imports = sorted_strs(css_imports.iter().map(String::as_str));
+    for css_import in css_imports {
+      push_value(&mut identifier, css_import);
+    }
+    identifier.push(']');
+  }
+
+  ModuleIdentifier::from(identifier)
+}
+
+fn sorted_strs<'a>(values: impl Iterator<Item = &'a str>) -> Vec<&'a str> {
+  let mut values = values.collect::<Vec<_>>();
+  values.sort_unstable();
+  values
+}
+
+fn push_value(identifier: &mut String, value: &str) {
+  write!(identifier, "{}:", value.len())
+    .expect("writing RSC entry module identifier should not fail");
+  identifier.push_str(value);
+}
+
+fn create_referenced_specifiers(ids: &FxIndexSet<Atom>) -> Option<Vec<ReferencedSpecifier>> {
+  if ids.is_empty() || ids.iter().any(|id| id == "*") {
+    return None;
+  }
+
+  Some(
+    ids
+      .iter()
+      .map(|id| ReferencedSpecifier::new(vec![Atom::from(id.as_str())]))
+      .collect(),
+  )
+}
+
+fn create_referenced_exports_by_request(
+  client_modules: &[ClientModuleImport],
+) -> FxHashMap<&str, String> {
+  client_modules
+    .iter()
+    .map(|client_module| {
+      let exports = format_referenced_exports(client_module);
+      (client_module.request.as_str(), exports)
+    })
+    .collect()
+}
+
+fn append_debug_comment_for_request(
+  source: &mut String,
+  exports: Option<&str>,
+  compilation: &Compilation,
+  request: &str,
+) {
+  let request = contextify(compilation.options.context.as_path(), request);
+  append_debug_comment(source, &request, exports.unwrap_or("unknown"));
+}
+
+fn sanitize_comment_part(value: &str) -> Cow<'_, str> {
+  if value.contains("*/") {
+    value.cow_replace("*/", "* /")
+  } else {
+    Cow::Borrowed(value)
+  }
+}
+
+fn append_debug_comment(source: &mut String, request: &str, exports: &str) {
+  if !source.is_empty() {
+    source.push('\n');
+  }
+
+  let request = sanitize_comment_part(request);
+  let exports = sanitize_comment_part(exports);
+  write!(
+    source,
+    "/*!\n * module: {request}\n * exports: {exports}\n */"
+  )
+  .expect("writing debug comments to String should not fail");
+}
+
+fn format_referenced_exports(client_module: &ClientModuleImport) -> String {
+  if client_module.ids.is_empty() {
+    return "side-effect".to_string();
+  }
+
+  if client_module.ids.iter().any(|id| id == "*") {
+    return "*".to_string();
+  }
+
+  let mut exports = String::new();
+  for id in &client_module.ids {
+    if !exports.is_empty() {
+      exports.push_str(", ");
+    }
+    exports.push_str(id.as_str());
+  }
+  exports
+}

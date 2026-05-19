@@ -4,7 +4,8 @@ use napi::Either;
 use napi_derive::napi;
 use rspack_plugin_rsdoctor::{
   RsdoctorAsset, RsdoctorAssetPatch, RsdoctorChunk, RsdoctorChunkAssets, RsdoctorChunkGraph,
-  RsdoctorChunkModules, RsdoctorConnection, RsdoctorDependency, RsdoctorEntrypoint,
+  RsdoctorChunkModules, RsdoctorConnection, RsdoctorConnectionsOnlyImport,
+  RsdoctorConnectionsOnlyImportConnection, RsdoctorDependency, RsdoctorEntrypoint,
   RsdoctorEntrypointAssets, RsdoctorExportInfo, RsdoctorModule, RsdoctorModuleGraph,
   RsdoctorModuleGraphModule, RsdoctorModuleId, RsdoctorModuleIdsPatch,
   RsdoctorModuleOriginalSource, RsdoctorModuleSourcesPatch, RsdoctorPluginChunkGraphFeature,
@@ -12,6 +13,7 @@ use rspack_plugin_rsdoctor::{
   RsdoctorSideEffect, RsdoctorSideEffectLocation, RsdoctorSourcePosition, RsdoctorSourceRange,
   RsdoctorStatement, RsdoctorVariable,
 };
+use rustc_hash::FxHashSet;
 
 #[napi(object)]
 pub struct JsRsdoctorModule {
@@ -30,6 +32,7 @@ pub struct JsRsdoctorModule {
   pub issuer_path: Vec<i32>,
   pub bailout_reason: Vec<String>,
   pub side_effects_locations: Vec<JsRsdoctorSideEffectLocation>,
+  pub exports_type: String,
 }
 
 impl From<RsdoctorModule> for JsRsdoctorModule {
@@ -58,6 +61,7 @@ impl From<RsdoctorModule> for JsRsdoctorModule {
         .into_iter()
         .map(|loc| loc.into())
         .collect::<Vec<_>>(),
+      exports_type: value.exports_type.to_string(),
     }
   }
 }
@@ -108,6 +112,40 @@ impl From<RsdoctorConnection> for JsRsdoctorConnection {
       user_request: value.user_request,
       loc: value.loc,
       active: value.active,
+    }
+  }
+}
+
+#[napi(object)]
+pub struct JsRsdoctorConnectionsOnlyImportConnection {
+  pub origin_module: Option<i32>,
+  pub dependency_type: String,
+  pub user_request: String,
+}
+
+impl From<RsdoctorConnectionsOnlyImportConnection> for JsRsdoctorConnectionsOnlyImportConnection {
+  fn from(value: RsdoctorConnectionsOnlyImportConnection) -> Self {
+    JsRsdoctorConnectionsOnlyImportConnection {
+      origin_module: value.origin_module,
+      dependency_type: value.dependency_type,
+      user_request: value.user_request,
+    }
+  }
+}
+
+#[napi(object)]
+pub struct JsRsdoctorConnectionsOnlyImport {
+  pub module_ukey: i32,
+  pub module_path: String,
+  pub connections: Vec<JsRsdoctorConnectionsOnlyImportConnection>,
+}
+
+impl From<RsdoctorConnectionsOnlyImport> for JsRsdoctorConnectionsOnlyImport {
+  fn from(value: RsdoctorConnectionsOnlyImport) -> Self {
+    JsRsdoctorConnectionsOnlyImport {
+      module_ukey: value.module_ukey,
+      module_path: value.module_path,
+      connections: value.connections.into_iter().map(|c| c.into()).collect(),
     }
   }
 }
@@ -355,6 +393,7 @@ pub struct JsRsdoctorModuleGraph {
   pub modules: Vec<JsRsdoctorModule>,
   pub dependencies: Vec<JsRsdoctorDependency>,
   pub chunk_modules: Vec<JsRsdoctorChunkModules>,
+  pub connections_only_imports: Vec<JsRsdoctorConnectionsOnlyImport>,
 }
 
 impl From<RsdoctorModuleGraph> for JsRsdoctorModuleGraph {
@@ -363,6 +402,11 @@ impl From<RsdoctorModuleGraph> for JsRsdoctorModuleGraph {
       modules: value.modules.into_iter().map(|m| m.into()).collect(),
       dependencies: value.dependencies.into_iter().map(|d| d.into()).collect(),
       chunk_modules: value.chunk_modules.into_iter().map(|c| c.into()).collect(),
+      connections_only_imports: value
+        .connections_only_imports
+        .into_iter()
+        .map(|s| s.into())
+        .collect(),
     }
   }
 }
@@ -541,27 +585,27 @@ impl From<RawRsdoctorPluginOptions> for RsdoctorPluginOptions {
 
     Self {
       module_graph_features: match value.module_graph_features {
-        Either::A(true) => HashSet::from([
+        Either::A(true) => FxHashSet::from_iter([
           RsdoctorPluginModuleGraphFeature::ModuleGraph,
           RsdoctorPluginModuleGraphFeature::ModuleIds,
           RsdoctorPluginModuleGraphFeature::ModuleSources,
         ]),
-        Either::A(false) => HashSet::new(),
+        Either::A(false) => FxHashSet::default(),
         Either::B(features) => features
           .into_iter()
           .map(RsdoctorPluginModuleGraphFeature::from)
-          .collect::<HashSet<_>>(),
+          .collect::<FxHashSet<_>>(),
       },
       chunk_graph_features: match value.chunk_graph_features {
-        Either::A(true) => HashSet::from([
+        Either::A(true) => FxHashSet::from_iter([
           RsdoctorPluginChunkGraphFeature::ChunkGraph,
           RsdoctorPluginChunkGraphFeature::Assets,
         ]),
-        Either::A(false) => HashSet::new(),
+        Either::A(false) => FxHashSet::default(),
         Either::B(features) => features
           .into_iter()
           .map(RsdoctorPluginChunkGraphFeature::from)
-          .collect::<HashSet<_>>(),
+          .collect::<FxHashSet<_>>(),
       },
       source_map_features,
     }

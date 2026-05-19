@@ -11,6 +11,7 @@ it('should support dyn import with no conflicting exports', async () => {
 	expect(barFn()).toBe(2)
 })
 
+export {};
 
 ```
 
@@ -22,7 +23,7 @@ const fooFn = () => 1;
 // ./b.js
 const bar = 2;
 const barFn = () => 2;
-
+const useless = () => 'useless';
 
 export { bar, barFn, foo, fooFn };
 

@@ -1,3 +1,7 @@
+---
+description: 'Use optimization config to custom optimization strategy'
+---
+
 import { ApiMeta } from '@components/ApiMeta';
 import PropertyType from '../../../components/PropertyType.tsx';
 
@@ -330,7 +334,7 @@ export default {
 ## optimization.moduleIds
 
 <PropertyType
-  type="'natural' | 'named' | 'deterministic'"
+  type="'natural' | 'named' | 'deterministic' | 'hashed'"
   defaultValueList={[
     { defaultValue: "'deterministic'", mode: 'production' },
     { defaultValue: "'named'", mode: 'development' },
@@ -346,6 +350,7 @@ The following string values are supported:
 | `natural`       | Use numeric ids in order of usage.                                                                                             |
 | `named`         | Use meaningful, easy-to-debug content as id.                                                                                   |
 | `deterministic` | Use the hashed module identifier as the id to benefit from long-term caching. By default a minimum length of 3 digits is used. |
+| `hashed`        | Use hashed module identifiers as ids. Equivalent to using `HashedModuleIdsPlugin` with default options (md4, base64, 4 chars). |
 
 ```js title="rspack.config.mjs"
 export default {
@@ -419,26 +424,6 @@ export default {
   },
 };
 ```
-
-## optimization.removeAvailableModules
-
-<PropertyType type="boolean" defaultValueList={[{ defaultValue: 'true' }]} />
-
-Whether to detect and remove modules from chunks when these modules are already included in parent chunks. This optimization helps to reduce duplicated modules in the bundle.
-
-This optimization is enabled by default and setting `optimization.removeAvailableModules` to `false` will disable this optimization:
-
-```js title="rspack.config.mjs"
-export default {
-  optimization: {
-    removeAvailableModules: false,
-  },
-};
-```
-
-:::danger
-Disabling this optimization is dangerous, as it may significantly increase the bundle size and greatly slow down the build process.
-:::
 
 ## optimization.removeEmptyChunks
 

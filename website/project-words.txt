@@ -50,6 +50,7 @@ evanw
 experimentscss
 externalstypecommonjs
 faga295
+fansenze
 fargs
 feishu
 fi3ework
@@ -67,6 +68,7 @@ indicatif
 inituit
 innovatively
 inottn
+intellild
 intlify
 IWANABETHATGUY
 jantimon
@@ -92,6 +94,7 @@ memfs
 mimalloc
 minifiers
 miro
+MPHF
 modulegeneratorassetdataurl
 modulegeneratorassetdataurlencoding
 modulegeneratorassetdataurlmimetype
@@ -176,7 +179,6 @@ shulaoda
 sockjs
 sokra
 solidjs
-spdy
 statoscope
 struct
 suxin2017
@@ -206,11 +208,13 @@ valorkin
 vant
 verkada
 viktoriialurie
+vize
 weapp
 webpack
 xcode
 xcrun
 xctrace
+xmcp
 Xeon
 XKKCNZZNJD
 xstyled

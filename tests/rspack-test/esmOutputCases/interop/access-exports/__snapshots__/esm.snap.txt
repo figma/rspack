@@ -1,5 +1,6 @@
 ```mjs title=main.mjs
 import { __webpack_require__ } from "./runtime.mjs";
+
 __webpack_require__.add({
 "./cjs.js"
 /*!****************!*\
@@ -23,6 +24,7 @@ var cjs_default = /*#__PURE__*/__webpack_require__.n(cjs);
 it('should have correct runtime interop', () => {
   expect((cjs_default())).toBe(42)
 })
+export {};
 
 ```
 

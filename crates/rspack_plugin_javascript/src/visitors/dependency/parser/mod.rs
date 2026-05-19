@@ -45,11 +45,11 @@ use swc_core::{
 
 use crate::{
   BoxJavascriptParserPlugin,
-  dependency::local_module::LocalModule,
+  dependency::{DependencyBranchGuard, local_module::LocalModule, set_dependency_branch_guards},
   parser_and_generator::ParserRuntimeRequirementsData,
   parser_plugin::{
-    self, ImportsReferencesState, InnerGraphState, JavaScriptParserPluginDrive,
-    JavascriptParserPlugin, RequireReferencesState,
+    self, ImportsReferencesState, InnerGraphParserPlugin, JavaScriptParserPluginDrive,
+    JavascriptParserPlugin, RequireReferencesState, inner_graph::state::InnerGraphState,
   },
   utils::eval::{self, BasicEvaluatedExpression},
   visitors::{
@@ -65,6 +65,8 @@ pub trait TagInfoData: Clone + Sized + 'static {
   fn into_any(data: Self) -> Box<dyn anymap::CloneAny>;
 
   fn downcast(any: Box<dyn anymap::CloneAny>) -> Self;
+
+  fn downcast_ref(any: &dyn anymap::CloneAny) -> &Self;
 }
 
 impl<T> TagInfoData for T
@@ -78,6 +80,13 @@ where
   fn downcast(any: Box<dyn anymap::CloneAny>) -> Self {
     *(any as Box<dyn std::any::Any>)
       .downcast()
+      .expect("TagInfoData should be downcasted from correct tag info")
+  }
+
+  fn downcast_ref(any: &dyn anymap::CloneAny) -> &Self {
+    let any = any as &dyn std::any::Any;
+    any
+      .downcast_ref()
       .expect("TagInfoData should be downcasted from correct tag info")
   }
 }
@@ -134,8 +143,16 @@ pub enum ExportedVariableInfo {
   VariableInfo(VariableInfoId),
 }
 
-fn object_and_members_to_name(object: String, members_reversed: &[impl AsRef<str>]) -> String {
-  let mut name = object;
+fn object_and_members_to_name(object: &Atom, members_reversed: &[impl AsRef<str>]) -> String {
+  let total_len = object.len()
+    + members_reversed.len()
+    + members_reversed
+      .iter()
+      .map(|m| m.as_ref().len())
+      .sum::<usize>();
+
+  let mut name = String::with_capacity(total_len);
+  name.push_str(object);
   let iter = members_reversed.iter();
   for member in iter.rev() {
     name.push('.');
@@ -355,7 +372,7 @@ pub struct JavascriptParser<'parser> {
   pub(crate) plugin_drive: Rc<JavaScriptParserPluginDrive>,
   // ===== states =======
   pub(crate) definitions_db: ScopeInfoDB,
-  pub(super) definitions: ScopeInfoId,
+  pub(crate) definitions: ScopeInfoId,
   pub(crate) top_level_scope: TopLevelScope,
   pub(crate) current_tag_info: Option<TagInfoId>,
   pub in_try: bool,
@@ -380,6 +397,7 @@ pub struct JavascriptParser<'parser> {
   pub(crate) is_renaming: Option<Atom>,
   pub(crate) location_advancer: DependencyLocationAdvancer,
   pub(crate) collecting_dependencies_for_block: Option<usize>,
+  pub(crate) dependency_branch_guards: Vec<DependencyBranchGuard>,
 }
 
 impl<'parser> JavascriptParser<'parser> {
@@ -409,26 +427,28 @@ impl<'parser> JavascriptParser<'parser> {
     let presentational_dependencies = Vec::with_capacity(64);
     let parser_exports_state: Option<bool> = None;
 
-    let mut plugins: Vec<BoxJavascriptParserPlugin> = Vec::with_capacity(32);
+    let mut plugins: Vec<BoxJavascriptParserPlugin> = Vec::with_capacity(32 + parser_plugins.len());
 
     plugins.append(parser_plugins);
 
     plugins.push(Box::new(parser_plugin::InitializeEvaluating));
     plugins.push(Box::new(parser_plugin::JavascriptMetaInfoPlugin));
-    plugins.push(Box::new(parser_plugin::CheckVarDeclaratorIdent));
     plugins.push(Box::new(parser_plugin::ConstPlugin));
     plugins.push(Box::new(parser_plugin::UseStrictPlugin));
-    plugins.push(Box::new(
-      parser_plugin::RequireContextDependencyParserPlugin,
-    ));
-    plugins.push(Box::new(
-      parser_plugin::RequireEnsureDependenciesBlockParserPlugin,
-    ));
+
+    if matches!(module_type, ModuleType::JsAuto | ModuleType::JsDynamic) {
+      plugins.push(Box::new(
+        parser_plugin::RequireContextDependencyParserPlugin,
+      ));
+      plugins.push(Box::new(
+        parser_plugin::RequireEnsureDependenciesBlockParserPlugin,
+      ));
+    }
     plugins.push(Box::new(parser_plugin::CompatibilityPlugin));
 
     if module_type.is_js_auto() || module_type.is_js_esm() {
       plugins.push(Box::new(parser_plugin::ESMTopLevelThisParserPlugin));
-      plugins.push(Box::new(parser_plugin::ESMDetectionParserPlugin::default()));
+      plugins.push(Box::<parser_plugin::ESMDetectionParserPlugin>::default());
       plugins.push(Box::new(
         parser_plugin::ImportMetaContextDependencyParserPlugin,
       ));
@@ -503,14 +523,16 @@ impl<'parser> JavascriptParser<'parser> {
       plugins.push(Box::new(parser_plugin::InlineConstPlugin));
     }
     if compiler_options.optimization.inner_graph {
-      plugins.push(Box::new(parser_plugin::InnerGraphPlugin::new(
+      plugins.push(Box::new(parser_plugin::InnerGraphParserPlugin::new(
         unresolved_mark,
+        compiler_options.experiments.pure_functions,
       )));
     }
 
     if compiler_options.optimization.side_effects.is_true() {
       plugins.push(Box::new(parser_plugin::SideEffectsParserPlugin::new(
         unresolved_mark,
+        compiler_options.experiments.pure_functions,
       )));
     }
 
@@ -563,11 +585,16 @@ impl<'parser> JavascriptParser<'parser> {
       is_renaming: None,
       location_advancer: DependencyLocationAdvancer::new(),
       collecting_dependencies_for_block: None,
+      dependency_branch_guards: Vec::new(),
     }
   }
 
-  pub fn into_results(self) -> Result<ScanDependenciesResult, Vec<Diagnostic>> {
+  pub fn into_results(mut self) -> Result<ScanDependenciesResult, Vec<Diagnostic>> {
     if self.errors.is_empty() {
+      InnerGraphParserPlugin::finalize_dependency_usage(
+        &mut self.inner_graph,
+        &mut self.dependencies,
+      );
       Ok(ScanDependenciesResult {
         dependencies: self.dependencies,
         blocks: self.blocks,
@@ -580,12 +607,23 @@ impl<'parser> JavascriptParser<'parser> {
     }
   }
 
-  pub fn add_dependency(&mut self, dep: BoxDependency) {
+  pub fn add_dependency(&mut self, mut dep: BoxDependency) {
+    if !self.dependency_branch_guards.is_empty() {
+      set_dependency_branch_guards(dep.as_mut(), &self.dependency_branch_guards);
+    }
     self.dependencies.push(dep);
   }
 
   pub fn add_dependencies(&mut self, deps: impl IntoIterator<Item = BoxDependency>) {
-    self.dependencies.extend(deps);
+    if self.dependency_branch_guards.is_empty() {
+      self.dependencies.extend(deps);
+    } else {
+      let branch_guards = self.dependency_branch_guards.clone();
+      self.dependencies.extend(deps.into_iter().map(|mut dep| {
+        set_dependency_branch_guards(dep.as_mut(), &branch_guards);
+        dep
+      }));
+    }
   }
 
   pub fn pop_dependency(&mut self) -> Option<BoxDependency> {
@@ -639,7 +677,12 @@ impl<'parser> JavascriptParser<'parser> {
     self.presentational_dependencies.get_mut(idx)
   }
 
-  pub fn add_block(&mut self, block: Box<AsyncDependenciesBlock>) {
+  pub fn add_block(&mut self, mut block: Box<AsyncDependenciesBlock>) {
+    if !self.dependency_branch_guards.is_empty() {
+      for dep in block.dependencies_mut() {
+        set_dependency_branch_guards(dep.as_mut(), &self.dependency_branch_guards);
+      }
+    }
     self.blocks.push(block);
   }
 
@@ -725,28 +768,49 @@ impl<'parser> JavascriptParser<'parser> {
     Some(self.definitions_db.expect_get_variable(id))
   }
 
-  pub fn get_tag_data(
+  fn get_tag_data_by_id<Data: TagInfoData>(
+    &self,
+    tag_info_id: TagInfoId,
+    tag: &'static str,
+  ) -> Option<&Data> {
+    let mut tag_info = Some(self.definitions_db.expect_get_tag_info(tag_info_id));
+
+    while let Some(cur_tag_info) = tag_info {
+      if cur_tag_info.tag == tag {
+        return cur_tag_info
+          .data
+          .as_deref()
+          .map(|data| TagInfoData::downcast_ref(data));
+      }
+      tag_info = cur_tag_info
+        .next
+        .map(|tag_info_id| self.definitions_db.expect_get_tag_info(tag_info_id))
+    }
+
+    None
+  }
+
+  pub fn get_tag_data<Data: TagInfoData>(
     &mut self,
     name: &Atom,
     tag: &'static str,
-  ) -> Option<Box<dyn anymap::CloneAny>> {
+  ) -> Option<&Data> {
     self
       .get_variable_info(name)
       .and_then(|variable_info| variable_info.tag_info)
-      .and_then(|tag_info_id| {
-        let mut tag_info = Some(self.definitions_db.expect_get_tag_info(tag_info_id));
+      .and_then(|tag_info_id| self.get_tag_data_by_id(tag_info_id, tag))
+  }
 
-        while let Some(cur_tag_info) = tag_info {
-          if cur_tag_info.tag == tag {
-            return cur_tag_info.data.clone();
-          }
-          tag_info = cur_tag_info
-            .next
-            .map(|tag_info_id| self.definitions_db.expect_get_tag_info(tag_info_id))
-        }
-
-        None
-      })
+  pub fn get_variable_tag_data<Data: TagInfoData>(
+    &self,
+    id: VariableInfoId,
+    tag: &'static str,
+  ) -> Option<&Data> {
+    self
+      .definitions_db
+      .expect_get_variable(id)
+      .tag_info
+      .and_then(|tag_info_id| self.get_tag_data_by_id(tag_info_id, tag))
   }
 
   pub fn get_free_info_from_variable<'a>(&'a mut self, name: &'a Atom) -> Option<NameInfo<'a>> {
@@ -958,7 +1022,7 @@ impl<'parser> JavascriptParser<'parser> {
           info: root_info,
         } = self.get_name_info_from_variable(&root_name)?;
 
-        let name = object_and_members_to_name(resolved_root.to_string(), &members);
+        let name = object_and_members_to_name(resolved_root, &members);
         members.reverse();
         members_optionals.reverse();
         member_ranges.reverse();

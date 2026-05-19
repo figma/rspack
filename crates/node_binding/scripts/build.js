@@ -5,7 +5,7 @@ const { values, positionals } = require("node:util").parseArgs({
 	options: {
 		profile: {
 			type: "string"
-		}
+		},
 	},
 	strict: true,
 	allowPositionals: true
@@ -45,15 +45,18 @@ async function build() {
 		const features = [];
 		const envs = { ...process.env };
 		const use_build_std = values.profile === "release"
-				|| values.profile === "release-debug"
-				|| values.profile === "release-wasi"
-				|| values.profile === "profiling";
+			|| values.profile === "release-debug"
+			|| values.profile === "release-wasi"
+			|| values.profile === "profiling";
 
 		if (values.profile) {
 			args.push("--profile", values.profile);
 		}
 		if (watch) {
 			args.push("--watch");
+		}
+		if (process.env.USE_NAPI_CROSS) {
+			args.push("--use-napi-cross");
 		}
 		if (process.env.USE_ZIG) {
 			args.push("--cross-compile");
@@ -67,8 +70,9 @@ async function build() {
 		}
 		if (process.env.RSPACK_TARGET_BROWSER) {
 			features.push("browser")
-			// Strip debug format to reduce wasm size of @rspack/browser
-			rustflags.push("-Zfmt-debug=none");
+		}
+		if (values.profile !== "release") {
+			features.push("perfetto");
 		}
 		args.push("--no-dts-cache");
 		if (process.env.SFTRACE) {
@@ -87,6 +91,12 @@ async function build() {
 			if (process.env.RUST_TARGET && !process.env.RUST_TARGET.includes("windows-msvc")) {
 				rustflags.push("-Cforce-unwind-tables=no");
 			}
+		} else {
+			// enable unwind-table for backtrace for non-release profile
+			if (!process.env.RUST_TARGET || (process.env.RUST_TARGET && !process.env.RUST_TARGET.includes("windows-msvc"))) {
+				rustflags.push("-Cforce-unwind-tables=yes");
+			}
+
 		}
 		if (features.length) {
 			args.push(`--features ${features.join(",")}`);
@@ -124,7 +134,6 @@ async function build() {
 		cp.on("error", reject);
 		cp.on("exit", (code) => {
 			if (code === CARGO_SAFELY_EXIT_CODE) {
-
 				// Fix an issue where napi cli does not generate `string_enum` with `enum`s.
 				const dts = path.resolve(__dirname, "..", NAPI_BINDING_DTS);
 				writeFileSync(dts,
@@ -142,9 +151,9 @@ async function build() {
 					renameSync("rspack.wasm32-wasi.wasm", "rspack.browser.wasm")
 				}
 
-				if(process.env.TRACY){
+				if (process.env.TRACY) {
 					// split debug symbols for tracy
-				  spawnSync('dsymutil', [
+					spawnSync('dsymutil', [
 						path.resolve(__dirname, "..", "rspack.darwin-arm64.node")
 					], {
 						stdio: "inherit",

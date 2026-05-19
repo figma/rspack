@@ -2,6 +2,7 @@ mod amd_require_context_dependency;
 mod common_js_require_context_dependency;
 mod import_context_dependency;
 mod import_meta_context_dependency;
+mod import_meta_resolve_context_dependency;
 mod require_context_dependency;
 mod require_resolve_context_dependency;
 mod url_context_dependency;
@@ -15,6 +16,9 @@ pub use common_js_require_context_dependency::{
 pub use import_context_dependency::{ImportContextDependency, ImportContextDependencyTemplate};
 pub use import_meta_context_dependency::{
   ImportMetaContextDependency, ImportMetaContextDependencyTemplate,
+};
+pub use import_meta_resolve_context_dependency::{
+  ImportMetaResolveContextDependency, ImportMetaResolveContextDependencyTemplate,
 };
 use itertools::Itertools;
 pub use require_context_dependency::{RequireContextDependency, RequireContextDependencyTemplate};
@@ -51,9 +55,21 @@ fn create_resource_identifier_for_context_dependency(
     .unwrap_or_default();
   let mode = options.mode.as_str();
   let referenced_exports = options
-    .referenced_exports
+    .referenced_specifiers
     .as_ref()
-    .map(|ids| ids.iter().map(|ids| ids.iter().join(".")).join(", "))
+    .map(|specifiers| {
+      specifiers
+        .iter()
+        .map(|specifier| {
+          let s = specifier.names.iter().join(".");
+          if specifier.namespace_object_as_context && specifier.is_call {
+            format!("*.{s}()")
+          } else {
+            s
+          }
+        })
+        .join(", ")
+    })
     .unwrap_or_default();
   let mut group_options = String::new();
 

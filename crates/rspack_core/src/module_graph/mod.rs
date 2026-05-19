@@ -1,18 +1,21 @@
 pub mod internal;
 pub mod rollback;
 
+use std::hash::BuildHasherDefault;
+
 use internal::try_get_module_graph_module_mut_by_identifier;
 use rayon::prelude::*;
-use rspack_collections::{IdentifierMap, UkeyMap};
+use rspack_collections::{IdentifierHasher, IdentifierMap};
 use rspack_error::Result;
 use rspack_hash::RspackHashDigest;
-use rustc_hash::FxHashMap as HashMap;
+use rustc_hash::{FxHashMap as HashMap, FxHasher};
 use swc_core::ecma::atoms::Atom;
 
 use crate::{
-  AsyncDependenciesBlock, AsyncDependenciesBlockIdentifier, AsyncModulesArtifact, Compilation,
-  DependenciesBlock, Dependency, ExportInfo, ExportName, ImportedByDeferModulesArtifact,
-  ModuleGraphCacheArtifact, RuntimeSpec, UsedNameItem,
+  AsyncDependenciesBlock, AsyncDependenciesBlockIdentifier, AsyncDependenciesBlockIdentifierMap,
+  AsyncModulesArtifact, Compilation, DependenciesBlock, Dependency, ExportInfo,
+  ImportedByDeferModulesArtifact, ModuleGraphCacheArtifact, RuntimeSpec, SideEffectsStateArtifact,
+  UsedNameItem,
 };
 mod module;
 pub use module::*;
@@ -46,6 +49,54 @@ pub struct DependencyParents {
   pub index_in_block: usize,
 }
 
+#[derive(Debug, Default)]
+pub struct IncomingConnectionsByOriginModule<'a> {
+  non_modules: Vec<&'a ModuleGraphConnection>,
+  modules: IdentifierMap<Vec<&'a ModuleGraphConnection>>,
+}
+
+impl<'a> IncomingConnectionsByOriginModule<'a> {
+  fn with_capacity(capacity: usize) -> Self {
+    Self {
+      non_modules: Vec::new(),
+      modules: IdentifierMap::with_capacity_and_hasher(capacity, Default::default()),
+    }
+  }
+
+  fn push(
+    &mut self,
+    origin_module: Option<ModuleIdentifier>,
+    connection: &'a ModuleGraphConnection,
+  ) {
+    if let Some(origin_module) = origin_module {
+      self
+        .modules
+        .entry(origin_module)
+        .or_default()
+        .push(connection);
+    } else {
+      self.non_modules.push(connection);
+    }
+  }
+
+  pub fn non_modules(&self) -> &[&'a ModuleGraphConnection] {
+    &self.non_modules
+  }
+
+  pub fn modules(&self) -> &IdentifierMap<Vec<&'a ModuleGraphConnection>> {
+    &self.modules
+  }
+
+  pub fn into_parts(
+    self,
+  ) -> (
+    Vec<&'a ModuleGraphConnection>,
+    IdentifierMap<Vec<&'a ModuleGraphConnection>>,
+  ) {
+    (self.non_modules, self.modules)
+  }
+}
+
 /// Internal data structure for ModuleGraph
 /// There're 3 kinds of data in module_graph here
 /// 1. Data only setting during Make Phase which no need for clone or overlay to recover
@@ -57,12 +108,13 @@ pub struct DependencyParents {
 pub(crate) struct ModuleGraphData {
   /****** only modified during Make Phase */
   /// Module indexed by `ModuleIdentifier`.
-  pub(crate) modules: rollback::RollbackMap<ModuleIdentifier, BoxModule>,
+  pub(crate) modules:
+    rollback::RollbackMap<ModuleIdentifier, BoxModule, BuildHasherDefault<IdentifierHasher>>,
 
   /// Dependencies indexed by `DependencyId`.
-  dependencies: UkeyMap<DependencyId, BoxDependency>,
+  dependencies: HashMap<DependencyId, BoxDependency>,
   /// AsyncDependenciesBlocks indexed by `AsyncDependenciesBlockIdentifier`.
-  blocks: HashMap<AsyncDependenciesBlockIdentifier, Box<AsyncDependenciesBlock>>,
+  blocks: AsyncDependenciesBlockIdentifierMap<Box<AsyncDependenciesBlock>>,
 
   /// Dependency_id to parent module identifier and parent block
   ///
@@ -81,22 +133,24 @@ pub(crate) struct ModuleGraphData {
   ///     assert_eq!(parents_info.module, parent_module_id);
   ///   })
   /// ```
-  dependency_id_to_parents: UkeyMap<DependencyId, DependencyParents>,
+  dependency_id_to_parents: HashMap<DependencyId, DependencyParents>,
   // TODO try move condition as connection field
-  connection_to_condition: UkeyMap<DependencyId, DependencyCondition>,
+  connection_to_condition: HashMap<DependencyId, DependencyCondition>,
 
   /************************** Modified by Seal Phase **********************/
   /// ModuleGraphModule indexed by `ModuleIdentifier`.
   /// modified here https://github.com/web-infra-dev/rspack/blob/9ae2f0f3be22370197cd9ed3308982f84f2bb738/crates/rspack_core/src/compilation/build_chunk_graph/code_splitter.rs#L1216
-  module_graph_modules: rollback::OverlayMap<ModuleIdentifier, ModuleGraphModule>,
+  module_graph_modules:
+    rollback::OverlayMap<ModuleIdentifier, ModuleGraphModule, BuildHasherDefault<IdentifierHasher>>,
 
   /// ModuleGraphConnection indexed by `DependencyId`.
   /// modified here https://github.com/web-infra-dev/rspack/blob/9ae2f0f3be22370197cd9ed3308982f84f2bb738/crates/rspack_plugin_javascript/src/plugin/module_concatenation_plugin.rs#L820
-  connections: rollback::OverlayMap<DependencyId, ModuleGraphConnection>,
+  connections:
+    rollback::OverlayMap<DependencyId, ModuleGraphConnection, BuildHasherDefault<FxHasher>>,
 
   /***************** only Modified during Seal Phase ********************/
   // setting here https://github.com/web-infra-dev/rspack/blob/9ae2f0f3be22370197cd9ed3308982f84f2bb738/crates/rspack_plugin_javascript/src/plugin/side_effects_flag_plugin.rs#L318
-  dep_meta_map: UkeyMap<DependencyId, DependencyExtraMeta>,
+  dep_meta_map: HashMap<DependencyId, DependencyExtraMeta>,
 }
 impl ModuleGraphData {
   fn checkpoint(&mut self) {
@@ -170,7 +224,8 @@ impl ModuleGraph {
       .expect("should have mgm")
       .outgoing_connections();
 
-    let mut map: IdentifierMap<Vec<&ModuleGraphConnection>> = IdentifierMap::default();
+    let mut map: IdentifierMap<Vec<&ModuleGraphConnection>> =
+      IdentifierMap::with_capacity_and_hasher(connections.len(), Default::default());
     for dep_id in connections {
       let con = self
         .connection_by_dependency_id(dep_id)
@@ -186,6 +241,7 @@ impl ModuleGraph {
     runtime: Option<&RuntimeSpec>,
     module_graph: &ModuleGraph,
     module_graph_cache: &ModuleGraphCacheArtifact,
+    side_effects_state_artifact: &SideEffectsStateArtifact,
     exports_info_artifact: &ExportsInfoArtifact,
   ) -> IdentifierMap<Vec<&ModuleGraphConnection>> {
     let connections = self
@@ -193,7 +249,8 @@ impl ModuleGraph {
       .expect("should have mgm")
       .outgoing_connections();
 
-    let mut map: IdentifierMap<Vec<&ModuleGraphConnection>> = IdentifierMap::default();
+    let mut map: IdentifierMap<Vec<&ModuleGraphConnection>> =
+      IdentifierMap::with_capacity_and_hasher(connections.len(), Default::default());
     for dep_id in connections {
       let con = self
         .connection_by_dependency_id(dep_id)
@@ -202,6 +259,7 @@ impl ModuleGraph {
         module_graph,
         runtime,
         module_graph_cache,
+        side_effects_state_artifact,
         exports_info_artifact,
       ) {
         continue;
@@ -215,22 +273,18 @@ impl ModuleGraph {
   pub fn get_incoming_connections_by_origin_module(
     &self,
     module_id: &ModuleIdentifier,
-  ) -> HashMap<Option<ModuleIdentifier>, Vec<&ModuleGraphConnection>> {
+  ) -> IncomingConnectionsByOriginModule<'_> {
     let connections = self
       .module_graph_module_by_identifier(module_id)
       .expect("should have mgm")
       .incoming_connections();
 
-    let mut map: HashMap<Option<ModuleIdentifier>, Vec<&ModuleGraphConnection>> =
-      HashMap::default();
+    let mut map = IncomingConnectionsByOriginModule::with_capacity(connections.len());
     for dep_id in connections {
       let con = self
         .connection_by_dependency_id(dep_id)
         .expect("should have connection");
-      map
-        .entry(con.original_module_identifier)
-        .or_default()
-        .push(con);
+      map.push(con.original_module_identifier, con);
     }
     map
   }
@@ -273,7 +327,7 @@ impl ModuleGraph {
     {
       mgm.remove_outgoing_connection(dep_id);
       if force {
-        mgm.all_dependencies.retain(|id| id != dep_id);
+        mgm.all_dependencies_mut().retain(|id| id != dep_id);
       }
     }
     // remove incoming from module graph module
@@ -297,7 +351,7 @@ impl ModuleGraph {
       .map(|mgm| {
         (
           mgm.incoming_connections().clone(),
-          mgm.all_dependencies.clone(),
+          mgm.all_dependencies().to_vec(),
         )
       })
       .unwrap_or_default();
@@ -553,7 +607,7 @@ impl ModuleGraph {
       .expect("should insert block before get it")
   }
 
-  pub fn blocks(&self) -> &HashMap<AsyncDependenciesBlockIdentifier, Box<AsyncDependenciesBlock>> {
+  pub fn blocks(&self) -> &AsyncDependenciesBlockIdentifierMap<Box<AsyncDependenciesBlock>> {
     &self.inner.blocks
   }
 
@@ -744,7 +798,7 @@ impl ModuleGraph {
     self
       .module_graph_module_by_identifier(module_identifier)
       .map(|m| {
-        m.all_dependencies
+        m.all_dependencies()
           .iter()
           .filter_map(|dep_id| self.connection_by_dependency_id(dep_id))
       })
@@ -759,7 +813,7 @@ impl ModuleGraph {
     self
       .module_graph_module_by_identifier(module_identifier)
       .map(|m| {
-        m.all_dependencies
+        m.all_dependencies()
           .iter()
           .filter(|dep_id| self.connection_by_dependency_id(dep_id).is_some())
       })
@@ -810,6 +864,7 @@ impl ModuleGraph {
     &self,
     module_id: &ModuleIdentifier,
     module_graph_cache: &ModuleGraphCacheArtifact,
+    side_effects_state_artifact: &SideEffectsStateArtifact,
     exports_info_artifact: &ExportsInfoArtifact,
   ) -> bool {
     let mut has_connections = false;
@@ -819,7 +874,13 @@ impl ModuleGraph {
         return false;
       };
       if !module_dependency.get_optional()
-        || !connection.is_target_active(self, None, module_graph_cache, exports_info_artifact)
+        || !connection.is_target_active(
+          self,
+          None,
+          module_graph_cache,
+          side_effects_state_artifact,
+          exports_info_artifact,
+        )
       {
         return false;
       }
@@ -957,6 +1018,7 @@ impl ModuleGraph {
     connection: &ModuleGraphConnection,
     runtime: Option<&RuntimeSpec>,
     module_graph_cache: &ModuleGraphCacheArtifact,
+    side_effects_state_artifact: &SideEffectsStateArtifact,
     exports_info_artifact: &ExportsInfoArtifact,
   ) -> ConnectionState {
     let condition = self
@@ -969,6 +1031,30 @@ impl ModuleGraph {
       runtime,
       self,
       module_graph_cache,
+      side_effects_state_artifact,
+      exports_info_artifact,
+    )
+  }
+
+  pub fn is_connection_active(
+    &self,
+    connection: &ModuleGraphConnection,
+    runtime: Option<&RuntimeSpec>,
+    module_graph_cache: &ModuleGraphCacheArtifact,
+    side_effects_state_artifact: &SideEffectsStateArtifact,
+    exports_info_artifact: &ExportsInfoArtifact,
+  ) -> bool {
+    let condition = self
+      .inner
+      .connection_to_condition
+      .get(&connection.dependency_id)
+      .expect("should have condition");
+    condition.is_connection_active(
+      connection,
+      runtime,
+      self,
+      module_graph_cache,
+      side_effects_state_artifact,
       exports_info_artifact,
     )
   }
@@ -1091,26 +1177,9 @@ impl ModuleGraph {
     tasks: Vec<(ExportInfo, UsedNameItem)>,
   ) {
     for (export_info, used_name) in tasks {
-      let ExportInfo {
-        exports_info,
-        export_name,
-      } = export_info;
-
-      let data = exports_info_artifact.get_exports_info_mut_by_id(&exports_info);
-      match export_name {
-        ExportName::Named(name) => {
-          data
-            .named_exports_mut(&name)
-            .expect("should have named export")
-            .set_used_name(used_name);
-        }
-        ExportName::Other => {
-          data.other_exports_info_mut().set_used_name(used_name);
-        }
-        ExportName::SideEffects => {
-          data.side_effects_only_info_mut().set_used_name(used_name);
-        }
-      }
+      export_info
+        .as_data_mut(exports_info_artifact)
+        .set_used_name(used_name);
     }
   }
 }

@@ -1,3 +1,7 @@
+---
+description: '通过 optimization 来自定义优化配置'
+---
+
 import { ApiMeta } from '@components/ApiMeta';
 import PropertyType from '../../../components/PropertyType.tsx';
 
@@ -330,7 +334,7 @@ export default {
 ## optimization.moduleIds
 
 <PropertyType
-  type="'natural' | 'named' | 'deterministic'"
+  type="'natural' | 'named' | 'deterministic' | 'hashed'"
   defaultValueList={[
     { defaultValue: "'deterministic'", mode: 'production' },
     { defaultValue: "'named'", mode: 'development' },
@@ -341,11 +345,12 @@ export default {
 
 支持以下字符串值：
 
-| 选项            | 描述                                                                         |
-| --------------- | ---------------------------------------------------------------------------- |
-| `natural`       | 根据模块加载的顺序使用自增数字作为模块 id。                                  |
-| `named`         | 使用有意义、方便调试的内容当作模块 id。                                      |
-| `deterministic` | 使用对模块标识符哈希后的数字当作模块 id，有益于长期缓存。默认使用 3 位数字。 |
+| 选项            | 描述                                                                                                          |
+| --------------- | ------------------------------------------------------------------------------------------------------------- |
+| `natural`       | 根据模块加载的顺序使用自增数字作为模块 id。                                                                   |
+| `named`         | 使用有意义、方便调试的内容当作模块 id。                                                                       |
+| `deterministic` | 使用对模块标识符哈希后的数字当作模块 id，有益于长期缓存。默认使用 3 位数字。                                  |
+| `hashed`        | 使用模块标识符的哈希值作为模块 id。等同于使用默认选项（md4、base64、4 字符）的 `HashedModuleIdsPlugin` 插件。 |
 
 ```js title="rspack.config.mjs"
 export default {
@@ -417,26 +422,6 @@ export default {
   },
 };
 ```
-
-## optimization.removeAvailableModules
-
-<PropertyType type="boolean" defaultValueList={[{ defaultValue: 'true' }]} />
-
-是否检测并移除那些已经存在于父 chunks 中的模块。这项优化有助于减少打包产物中的重复模块，这通常可以优化整体的构建性能（通过减小了后续 chunk 优化的计算量）并减小产物体积。
-
-这项优化默认开启，如果需要禁用，可以将 `optimization.removeAvailableModules` 设置为 `false`：
-
-```js title="rspack.config.mjs"
-export default {
-  optimization: {
-    removeAvailableModules: false,
-  },
-};
-```
-
-:::danger
-禁用这项优化是危险的，因为它可能会显著增加包大小，并显著地降低构建速度。
-:::
 
 ## optimization.removeEmptyChunks
 

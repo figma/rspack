@@ -1,7 +1,7 @@
 use std::fmt;
 
 use rspack_cacheable::{cacheable, with::Skip};
-use rustc_hash::FxHashSet as HashSet;
+use rustc_hash::FxHashSet;
 
 use crate::{DependencyId, ModuleIdentifier, ModuleIssuer};
 
@@ -38,10 +38,10 @@ impl fmt::Display for OptimizationBailoutItem {
 #[derive(Debug, Clone)]
 pub struct ModuleGraphModule {
   // edges from module to module
-  outgoing_connections: HashSet<DependencyId>,
+  outgoing_connections: FxHashSet<DependencyId>,
   // incoming connections will regenerate by persistent cache recovery.
   #[cacheable(with=Skip)]
-  incoming_connections: HashSet<DependencyId>,
+  incoming_connections: FxHashSet<DependencyId>,
 
   issuer: ModuleIssuer,
 
@@ -49,7 +49,7 @@ pub struct ModuleGraphModule {
   pub module_identifier: ModuleIdentifier,
   // an quick way to get a module's all dependencies (including its blocks' dependencies)
   // and it is ordered by dependency creation order
-  pub(crate) all_dependencies: Vec<DependencyId>,
+  all_dependencies: Vec<DependencyId>,
   pub(crate) pre_order_index: Option<u32>,
   pub post_order_index: Option<u32>,
   pub depth: Option<usize>,
@@ -88,12 +88,20 @@ impl ModuleGraphModule {
     self.outgoing_connections.remove(dependency_id);
   }
 
-  pub fn incoming_connections(&self) -> &HashSet<DependencyId> {
+  pub fn incoming_connections(&self) -> &FxHashSet<DependencyId> {
     &self.incoming_connections
   }
 
-  pub fn outgoing_connections(&self) -> &HashSet<DependencyId> {
+  pub fn outgoing_connections(&self) -> &FxHashSet<DependencyId> {
     &self.outgoing_connections
+  }
+
+  pub fn all_dependencies(&self) -> &[DependencyId] {
+    &self.all_dependencies
+  }
+
+  pub(crate) fn all_dependencies_mut(&mut self) -> &mut Vec<DependencyId> {
+    &mut self.all_dependencies
   }
 
   pub fn set_issuer_if_unset(&mut self, issuer: Option<ModuleIdentifier>) {

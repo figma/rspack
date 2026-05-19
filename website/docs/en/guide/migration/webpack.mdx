@@ -1,3 +1,7 @@
+---
+description: "Rspack's configuration is designed based on webpack, enabling you to migrate your project from webpack to Rspack with ease"
+---
+
 import { PackageManagerTabs } from '@theme';
 
 # Migrate from webpack
@@ -215,7 +219,7 @@ Migrate [babel-loader](https://github.com/babel/babel-loader) to [builtin:swc-lo
 
 If you need custom transformation logic using Babel plugins, you can retain `babel-loader`, but it is recommended to limit its use to fewer files to prevent significant performance degradation.
 
-- Replace [@babel/preset-typescript](http://npmjs.com/package/@babel/preset-typescript) with SWC's `syntax: 'typescript'` option:
+- Replace [@babel/preset-typescript](http://npmjs.com/package/@babel/preset-typescript) with `builtin:swc-loader` using `detectSyntax: 'auto'`:
 
 ```diff title="rspack.config.js"
 module.exports = {
@@ -223,20 +227,15 @@ module.exports = {
     rules: [
       {
 -        test: /\.(j|t)sx?$/,
-+        test: /\.(j|t)s$/,
++        test: /\.(?:js|mjs|jsx|ts|tsx)$/,
         exclude: [/[\\/]node_modules[\\/]/],
         use: [
           {
--            loader: 'babel-loader',
-+            loader: 'builtin:swc-loader',
-            options: {
--              presets: ['@babel/preset-typescript'],
-+              jsc: {
-+                parser: {
-+                  syntax: 'typescript',
-+                },
-+              },
-            },
+-           loader: 'babel-loader',
++           loader: 'builtin:swc-loader',
++           options: {
++             detectSyntax: 'auto',
++           },
           },
         ],
       },
@@ -254,7 +253,7 @@ module.exports = {
   module: {
     rules: [
       {
-        test: /\.(j|t)sx?$/,
+        test: /\.(?:js|mjs|jsx|ts|tsx)$/,
         exclude: [/[\\/]node_modules[\\/]/],
         use: [
           {
@@ -263,10 +262,6 @@ module.exports = {
             options: {
 -              presets: ['@babel/preset-typescript', '@babel/preset-react'],
 +              jsc: {
-+                parser: {
-+                  syntax: 'typescript',
-+                  tsx: true,
-+                },
 +                transform: {
 +                  react: {
 +                    runtime: 'automatic',
@@ -275,6 +270,7 @@ module.exports = {
 +                  },
 +                },
 +              },
++              detectSyntax: 'auto',
             },
           },
         ],
@@ -368,3 +364,18 @@ Migrate [raw-loader](https://github.com/webpack-contrib/raw-loader) to [Asset Mo
    },
  };
 ```
+
+## Common webpack package replacements
+
+When migrating webpack ecosystem packages, the following non-plugin packages usually need to be replaced.
+
+| webpack package          | Rspack replacement                                                            | Notes                                  |
+| ------------------------ | ----------------------------------------------------------------------------- | -------------------------------------- |
+| `webpack`                | [`@rspack/core`](https://www.npmjs.com/package/@rspack/core)                  | Core package.                          |
+| `webpack-cli`            | [`@rspack/cli`](https://www.npmjs.com/package/@rspack/cli)                    | CLI commands for Rspack.               |
+| `webpack-dev-server`     | [`@rspack/dev-server`](https://github.com/rstackjs/rspack-dev-server)         | Development server for Rspack.         |
+| `webpack-dev-middleware` | [`@rspack/dev-middleware`](https://github.com/rstackjs/rspack-dev-middleware) | Middleware for custom Node.js servers. |
+| `webpack-chain`          | [`rspack-chain`](https://github.com/rstackjs/rspack-chain)                    | Chainable Rspack configuration API.    |
+| `webpack-merge`          | [`rspack-merge`](https://github.com/rstackjs/rspack-merge)                    | Rspack configuration merging.          |
+
+> For plugin packages, see [Plugin compatibility](/guide/compatibility/plugin).

@@ -1,23 +1,17 @@
-use std::sync::{
-  Arc,
-  atomic::{AtomicUsize, Ordering},
-};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use rayon::prelude::*;
 use rspack_cacheable::{cacheable, utils::OwnedOrRef};
 use rspack_collections::IdentifierSet;
 use rspack_error::Result;
-use rustc_hash::FxHashSet as HashSet;
+use rustc_hash::FxHashSet;
 
-use super::{
-  Storage,
-  alternatives::{TempDependency, TempModule},
-};
+use super::alternatives::{TempDependency, TempModule};
 use crate::{
   AsyncDependenciesBlock, AsyncDependenciesBlockIdentifier, BoxDependency, BoxModule, Dependency,
   DependencyId, DependencyParents, ModuleGraph, ModuleGraphConnection, ModuleGraphModule,
   ModuleIdentifier, RayonConsumer,
-  cache::persistent::codec::CacheCodec,
+  cache::persistent::{codec::CacheCodec, storage::Storage},
   compilation::build_module_graph::{LazyDependencies, ModuleToLazyMake},
 };
 
@@ -43,7 +37,7 @@ pub fn save_module_graph(
   module_to_lazy_make: &ModuleToLazyMake,
   removed_modules: &IdentifierSet,
   need_update_modules: &IdentifierSet,
-  storage: &Arc<dyn Storage>,
+  storage: &mut dyn Storage,
   codec: &CacheCodec,
 ) {
   for identifier in removed_modules {
@@ -67,7 +61,7 @@ pub fn save_module_graph(
         .map(|block_id| mg.block_by_id(block_id).expect("should have block").into())
         .collect::<Vec<_>>();
       let dependencies = mgm
-        .all_dependencies
+        .all_dependencies()
         .par_iter()
         .map(|dep_id| {
           (
@@ -129,9 +123,9 @@ pub fn save_module_graph(
 
 #[tracing::instrument("Cache::Occasion::Make::ModuleGraph::recovery", skip_all)]
 pub async fn recovery_module_graph(
-  storage: &Arc<dyn Storage>,
+  storage: &dyn Storage,
   codec: &CacheCodec,
-) -> Result<(ModuleGraph, ModuleToLazyMake, HashSet<DependencyId>)> {
+) -> Result<(ModuleGraph, ModuleToLazyMake, FxHashSet<DependencyId>)> {
   let mut need_check_dep = vec![];
   let mut mg = ModuleGraph::default();
   let mut module_to_lazy_make = ModuleToLazyMake::default();
@@ -189,7 +183,7 @@ pub async fn recovery_module_graph(
       entry_module.push(mgm.module_identifier);
     };
   }
-  let mut entry_dependencies: HashSet<DependencyId> = Default::default();
+  let mut entry_dependencies: FxHashSet<DependencyId> = Default::default();
   for mid in entry_module {
     let dep = TempDependency::default();
     let connection = ModuleGraphConnection::new(*dep.id(), None, mid, false);

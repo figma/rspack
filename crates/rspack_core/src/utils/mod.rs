@@ -8,6 +8,8 @@ use crate::{
   ChunkGraph, ChunkGroupByUkey, ChunkGroupUkey, ChunkUkey, Compilation, ConcatenatedModule,
   ModuleGraph, ModuleIdentifier,
 };
+#[cfg(feature = "codspeed")]
+mod codspeed;
 mod comment;
 mod compile_boolean_matcher;
 mod concatenated_module_visitor;
@@ -23,7 +25,6 @@ mod steal_cell;
 pub use fs_trim::*;
 mod hash;
 mod identifier;
-mod iterator_consumer;
 mod memory_gc;
 mod module_rules;
 mod property_access;
@@ -39,8 +40,11 @@ pub use compile_boolean_matcher::*;
 pub use concatenated_module_visitor::*;
 pub use concatenation_scope::*;
 pub use memory_gc::MemoryGCStorage;
+pub use rspack_parallel::{FutureConsumer, RayonConsumer};
 pub use steal_cell::StealCell;
 
+#[cfg(feature = "codspeed")]
+pub use self::codspeed::*;
 pub use self::{
   comment::*,
   extract_source_map::*,
@@ -50,7 +54,6 @@ pub use self::{
   find_graph_roots::*,
   hash::*,
   identifier::*,
-  iterator_consumer::{FutureConsumer, RayonConsumer, RayonFutureConsumer},
   module_rules::*,
   property_access::*,
   property_name::*,

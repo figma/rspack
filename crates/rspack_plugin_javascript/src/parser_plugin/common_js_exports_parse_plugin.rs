@@ -15,6 +15,7 @@ use crate::{
     CommonJsExportRequireDependency, CommonJsExportsDependency, CommonJsSelfReferenceDependency,
     ExportsBase, ModuleDecoratorDependency,
   },
+  parser_plugin::common_js_imports_parse_plugin::is_require_call_expr,
   utils::eval::{self, BasicEvaluatedExpression},
   visitors::JavascriptParser,
 };
@@ -145,11 +146,7 @@ fn parse_require_call<'a>(
     expr = &*member.obj;
   }
   if let Some(call) = expr.as_call()
-    && call.args.len() == 1
-    && let Some(callee) = call.callee.as_expr()
-    && let Some(callee) = callee.as_ident()
-    && let Some(info) = parser.get_free_info_from_variable(&callee.sym)
-    && info.name == "require"
+    && is_require_call_expr(parser, call)
   {
     let arg = &call.args[0];
     if arg.spread.is_some() {
@@ -250,7 +247,7 @@ fn handle_access_export(
     base,
     remaining.to_vec(),
     remaining_optionals.to_vec(),
-    true,
+    call_args.is_some(),
   )));
   if let Some(call_args) = call_args {
     parser.walk_expr_or_spread(call_args);
@@ -272,6 +269,7 @@ impl CommonJsExportsParserPlugin {
   }
 }
 
+#[rspack_macros::implemented_javascript_parser_hooks]
 impl JavascriptParserPlugin for CommonJsExportsParserPlugin {
   fn assign_member_chain(
     &self,

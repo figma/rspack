@@ -1,15 +1,15 @@
 use std::collections::{VecDeque, hash_map::Entry};
 
 use rayon::prelude::*;
-use rspack_collections::{IdentifierMap, UkeyMap};
+use rspack_collections::IdentifierMap;
 use rspack_core::{
   AsyncDependenciesBlockIdentifier, BuildMetaExportsType, CanInlineUse, Compilation,
   CompilationOptimizeDependencies, ConnectionState, DependenciesBlock, DependencyId, ExportsInfo,
   ExportsInfoArtifact, ExportsInfoData, ExtendedReferencedExport, GroupOptions, ModuleGraph,
   ModuleGraphCacheArtifact, ModuleIdentifier, Plugin, ReferencedExport, RuntimeSpec,
-  SideEffectsOptimizeArtifact, UsageState, build_module_graph::BuildModuleGraphArtifact,
-  get_entry_runtime, incremental::IncrementalPasses, is_exports_object_referenced,
-  is_no_exports_referenced,
+  SideEffectsOptimizeArtifact, SideEffectsStateArtifact, UsageState,
+  build_module_graph::BuildModuleGraphArtifact, get_entry_runtime, incremental::IncrementalPasses,
+  is_exports_object_referenced, is_no_exports_referenced, module_declared_side_effect_free,
 };
 use rspack_error::{Diagnostic, Result};
 use rspack_hook::{plugin, plugin_hook};
@@ -36,7 +36,7 @@ pub struct FlagDependencyUsagePluginProxy<'a> {
   compilation: &'a Compilation,
   build_module_graph_artifact: &'a mut BuildModuleGraphArtifact,
   exports_info_artifact: &'a mut ExportsInfoArtifact,
-  exports_info_module_map: UkeyMap<ExportsInfo, ModuleIdentifier>,
+  exports_info_module_map: HashMap<ExportsInfo, ModuleIdentifier>,
 }
 
 #[allow(unused)]
@@ -52,11 +52,15 @@ impl<'a> FlagDependencyUsagePluginProxy<'a> {
       compilation,
       build_module_graph_artifact,
       exports_info_artifact,
-      exports_info_module_map: UkeyMap::default(),
+      exports_info_module_map: HashMap::default(),
     }
   }
 
   async fn apply(&mut self) {
+    let side_effects_state_artifact = self
+      .build_module_graph_artifact
+      .side_effects_state_artifact
+      .clone();
     let mut module_graph = self.build_module_graph_artifact.get_module_graph_mut();
     self.exports_info_artifact.reset_all_exports_info_used();
 
@@ -97,17 +101,27 @@ impl<'a> FlagDependencyUsagePluginProxy<'a> {
         global_runtime.get_or_insert_default().extend(runtime);
       }
       for &dep in entry.dependencies.iter() {
-        self.process_entry_dependency(dep, runtime.clone(), &mut q);
+        self.process_entry_dependency(dep, runtime.clone(), &side_effects_state_artifact, &mut q);
       }
       for &dep in entry.include_dependencies.iter() {
-        self.process_entry_dependency(dep, runtime.clone(), &mut q);
+        self.process_entry_dependency(dep, runtime.clone(), &side_effects_state_artifact, &mut q);
       }
     }
     for dep in self.compilation.global_entry.dependencies.clone() {
-      self.process_entry_dependency(dep, global_runtime.clone(), &mut q);
+      self.process_entry_dependency(
+        dep,
+        global_runtime.clone(),
+        &side_effects_state_artifact,
+        &mut q,
+      );
     }
     for dep in self.compilation.global_entry.include_dependencies.clone() {
-      self.process_entry_dependency(dep, global_runtime.clone(), &mut q);
+      self.process_entry_dependency(
+        dep,
+        global_runtime.clone(),
+        &side_effects_state_artifact,
+        &mut q,
+      );
     }
 
     loop {
@@ -126,8 +140,8 @@ impl<'a> FlagDependencyUsagePluginProxy<'a> {
         .into_par_iter()
         .map(|(block_id, runtime, force_side_effects)| {
           let (referenced_exports, module_tasks) = self.process_module(
-            compilation,
             module_graph,
+            &side_effects_state_artifact,
             block_id,
             runtime.as_ref(),
             force_side_effects,
@@ -143,7 +157,8 @@ impl<'a> FlagDependencyUsagePluginProxy<'a> {
         .collect::<Vec<_>>();
 
       let mut nested_tasks = vec![];
-      let mut non_nested_tasks: IdentifierMap<Vec<NonNestedTask>> = IdentifierMap::default();
+      let mut non_nested_tasks: IdentifierMap<Vec<NonNestedTask>> =
+        IdentifierMap::with_capacity_and_hasher(batch_res.len(), Default::default());
 
       {
         // partition collected referenced exports to two parts:
@@ -156,8 +171,8 @@ impl<'a> FlagDependencyUsagePluginProxy<'a> {
           .into_par_iter()
           .map(
             |(runtime, force_side_effects, referenced_exports, module_tasks)| {
-              let mut nested_tasks = vec![];
-              let mut non_nested_tasks = vec![];
+              let mut nested_tasks = Vec::with_capacity(referenced_exports.len());
+              let mut non_nested_tasks = Vec::with_capacity(referenced_exports.len());
               for (module_id, exports) in referenced_exports {
                 let exports_info = self.exports_info_artifact.get_exports_info_data(&module_id);
                 let has_nested = exports.iter().any(|e| match e {
@@ -200,7 +215,7 @@ impl<'a> FlagDependencyUsagePluginProxy<'a> {
         non_nested_tasks
           .into_par_iter()
           .map(|(module_id, tasks)| {
-            let mut exports_info = self
+            let mut exports_info: ExportsInfoData = self
               .exports_info_artifact
               .get_exports_info_data(&module_id)
               .clone();
@@ -211,10 +226,8 @@ impl<'a> FlagDependencyUsagePluginProxy<'a> {
               module.build_meta().exports_type,
               BuildMetaExportsType::Unset
             );
-            let is_side_effect_free = match module.factory_meta() {
-              Some(meta) => meta.side_effect_free.unwrap_or_default(),
-              None => false,
-            };
+            let is_side_effect_free =
+              module_declared_side_effect_free(module.as_ref()).unwrap_or_default();
 
             let mut res = vec![];
             for (runtime, force_side_effects, exports) in tasks {
@@ -257,6 +270,7 @@ impl<'a> FlagDependencyUsagePluginProxy<'a> {
           referenced_exports,
           runtime.clone(),
           force_side_effects,
+          &side_effects_state_artifact,
         );
         for i in res {
           q.enqueue(i);
@@ -273,8 +287,8 @@ impl<'a> FlagDependencyUsagePluginProxy<'a> {
 
   fn process_module(
     &self,
-    compilation: &Compilation,
     module_graph: &ModuleGraph,
+    side_effects_state_artifact: &SideEffectsStateArtifact,
     block_id: ModuleOrAsyncDependenciesBlock,
     runtime: Option<&RuntimeSpec>,
     force_side_effects: bool,
@@ -283,22 +297,23 @@ impl<'a> FlagDependencyUsagePluginProxy<'a> {
     IdentifierMap<Vec<ExtendedReferencedExport>>,
     Vec<ProcessBlockTask>,
   ) {
+    let compilation = self.compilation;
     let mut q = vec![];
-    let mut map: IdentifierMap<ProcessModuleReferencedExports> = IdentifierMap::default();
 
     let (dependencies, async_blocks) = collect_active_dependencies(
       block_id,
       runtime,
       module_graph,
       &compilation.module_graph_cache_artifact,
+      side_effects_state_artifact,
       self.exports_info_artifact,
       global,
     );
+    let mut map = IdentifierMap::with_capacity_and_hasher(dependencies.len(), Default::default());
+    q.reserve(async_blocks.len());
     q.extend(async_blocks);
 
     for (dep_id, module_id) in dependencies {
-      let old_referenced_exports = map.remove(&module_id);
-
       let referenced_exports_result = get_dependency_referenced_exports(
         dep_id,
         module_graph,
@@ -319,11 +334,29 @@ impl<'a> FlagDependencyUsagePluginProxy<'a> {
           Some(module_graph),
         );
 
-      if let Some(mut referenced_exports) = referenced_exports_result
-        && let Some(new_referenced_exports) =
-          merge_referenced_exports(old_referenced_exports, referenced_exports)
-      {
-        map.insert(module_id, new_referenced_exports);
+      if let Some(mut referenced_exports) = referenced_exports_result {
+        match map.entry(module_id) {
+          Entry::Occupied(mut occ) => {
+            let merged_referenced_exports = merge_referenced_exports(
+              Some(std::mem::replace(
+                occ.get_mut(),
+                ProcessModuleReferencedExports::ExtendRef(Vec::new()),
+              )),
+              referenced_exports,
+            );
+            if let Some(new_referenced_exports) = merged_referenced_exports {
+              *occ.get_mut() = new_referenced_exports;
+            } else {
+              occ.remove();
+            }
+          }
+          Entry::Vacant(vac) => {
+            if let Some(new_referenced_exports) = merge_referenced_exports(None, referenced_exports)
+            {
+              vac.insert(new_referenced_exports);
+            }
+          }
+        }
       }
     }
 
@@ -348,6 +381,7 @@ impl<'a> FlagDependencyUsagePluginProxy<'a> {
     &mut self,
     dep: DependencyId,
     runtime: Option<RuntimeSpec>,
+    side_effects_state_artifact: &SideEffectsStateArtifact,
     queue: &mut Queue<ProcessBlockTask>,
   ) {
     if let Some(module) = self
@@ -365,6 +399,7 @@ impl<'a> FlagDependencyUsagePluginProxy<'a> {
         vec![],
         runtime,
         true,
+        side_effects_state_artifact,
       );
       for i in res {
         queue.enqueue(i);
@@ -379,6 +414,7 @@ impl<'a> FlagDependencyUsagePluginProxy<'a> {
     used_exports: Vec<ExtendedReferencedExport>,
     runtime: Option<RuntimeSpec>,
     force_side_effects: bool,
+    side_effects_state_artifact: &SideEffectsStateArtifact,
   ) -> Vec<ProcessBlockTask> {
     let mut queue = vec![];
     let mut module_graph = self.build_module_graph_artifact.get_module_graph_mut();
@@ -406,11 +442,14 @@ impl<'a> FlagDependencyUsagePluginProxy<'a> {
       }
 
       for used_export_info in used_exports {
-        let (used_exports, can_mangle, can_inline) = match used_export_info {
-          ExtendedReferencedExport::Array(used_exports) => (used_exports, true, true),
-          ExtendedReferencedExport::Export(export) => {
-            (export.name, export.can_mangle, export.can_inline)
-          }
+        let (used_exports, can_mangle, can_inline, ns_access) = match used_export_info {
+          ExtendedReferencedExport::Array(used_exports) => (used_exports, true, true, false),
+          ExtendedReferencedExport::Export(export) => (
+            export.name,
+            export.can_mangle,
+            export.can_inline,
+            export.ns_access,
+          ),
         };
         if used_exports.is_empty() {
           let flag = mgm_exports_info
@@ -433,6 +472,9 @@ impl<'a> FlagDependencyUsagePluginProxy<'a> {
               .as_data_mut(self.exports_info_artifact)
               .ensure_export_info(&used_export)
               .as_data_mut(self.exports_info_artifact);
+            if ns_access {
+              export_info.set_ns_access(true);
+            }
             if !can_mangle {
               export_info.set_can_mangle_use(Some(false));
             }
@@ -502,10 +544,7 @@ impl<'a> FlagDependencyUsagePluginProxy<'a> {
       }
     } else {
       if !force_side_effects
-        && match module.factory_meta() {
-          Some(meta) => meta.side_effect_free.unwrap_or_default(),
-          None => false,
-        }
+        && module_declared_side_effect_free(module.as_ref()).unwrap_or_default()
       {
         return queue;
       }
@@ -623,6 +662,7 @@ fn merge_referenced_exports(
                     name: std::mem::take(&mut export.name),
                     can_mangle: export.can_mangle && old_item.can_mangle,
                     can_inline: export.can_inline && old_item.can_inline,
+                    ns_access: export.ns_access || old_item.ns_access,
                   }));
                 }
               }
@@ -644,6 +684,7 @@ fn collect_active_dependencies(
   runtime: Option<&RuntimeSpec>,
   module_graph: &ModuleGraph,
   module_graph_cache: &ModuleGraphCacheArtifact,
+  side_effects_state_artifact: &SideEffectsStateArtifact,
   exports_info_artifact: &ExportsInfoArtifact,
   global: bool,
 ) -> (Vec<(DependencyId, ModuleIdentifier)>, Vec<ProcessBlockTask>) {
@@ -694,6 +735,7 @@ fn collect_active_dependencies(
         module_graph,
         runtime,
         module_graph_cache,
+        side_effects_state_artifact,
         exports_info_artifact,
       );
 
@@ -765,11 +807,14 @@ fn process_referenced_module_without_nested(
     }
 
     for used_export_info in used_exports {
-      let (used_exports, can_mangle, can_inline) = match used_export_info {
-        ExtendedReferencedExport::Array(used_exports) => (used_exports, true, true),
-        ExtendedReferencedExport::Export(export) => {
-          (export.name, export.can_mangle, export.can_inline)
-        }
+      let (used_exports, can_mangle, can_inline, ns_access) = match used_export_info {
+        ExtendedReferencedExport::Array(used_exports) => (used_exports, true, true, false),
+        ExtendedReferencedExport::Export(export) => (
+          export.name,
+          export.can_mangle,
+          export.can_inline,
+          export.ns_access,
+        ),
       };
       if used_exports.is_empty() {
         let flag = exports_info.set_used_in_unknown_way(runtime.as_ref());
@@ -784,6 +829,9 @@ fn process_referenced_module_without_nested(
       } else {
         let used_export = &used_exports[0];
         let export_info = exports_info.ensure_owned_export_info(used_export);
+        if ns_access {
+          export_info.set_ns_access(true);
+        }
         if !can_mangle {
           export_info.set_can_mangle_use(Some(false));
         }

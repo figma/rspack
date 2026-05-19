@@ -7,7 +7,7 @@ use std::{
 };
 
 use rayon::prelude::*;
-use rustc_hash::FxHashSet as HashSet;
+use rustc_hash::{FxHashMap, FxHashSet as HashSet};
 pub mod api_plugin;
 mod drive;
 mod flag_dependency_exports_plugin;
@@ -26,9 +26,7 @@ pub use flag_dependency_usage_plugin::*;
 pub use inline_exports_plugin::*;
 pub use mangle_exports_plugin::*;
 pub use module_concatenation_plugin::*;
-use rspack_collections::{
-  Identifier, IdentifierDashMap, IdentifierLinkedMap, IdentifierMap, UkeyMap,
-};
+use rspack_collections::{Identifier, IdentifierDashMap, IdentifierLinkedMap, IdentifierMap};
 use rspack_core::{
   ChunkGraph, ChunkGroupUkey, ChunkInitFragments, ChunkRenderContext, ChunkUkey,
   CodeGenerationDataTopLevelDeclarations, Compilation, CompilationId, ConcatenatedModuleIdent,
@@ -50,7 +48,7 @@ use rspack_util::allocative;
 pub use side_effects_flag_plugin::*;
 use swc_core::{
   atoms::Atom,
-  common::{FileName, Spanned, SyntaxContext},
+  common::{FileName, Spanned, SyntaxContext, comments::SingleThreadedComments},
   ecma::transforms::base::resolver,
 };
 use tokio::sync::RwLock;
@@ -61,7 +59,7 @@ use crate::runtime::{
 
 #[cfg_attr(allocative, allocative::root)]
 static COMPILATION_HOOKS_MAP: LazyLock<
-  SyncRwLock<UkeyMap<CompilationId, Arc<RwLock<JavascriptModulesPluginHooks>>>>,
+  SyncRwLock<FxHashMap<CompilationId, Arc<RwLock<JavascriptModulesPluginHooks>>>>,
 > = LazyLock::new(Default::default);
 
 #[derive(Debug, Clone)]
@@ -421,27 +419,27 @@ var {} = {{}};
             let module_graph_cache = &compilation.module_graph_cache_artifact;
             module_graph
               .get_incoming_connections_by_origin_module(module)
+              .modules()
               .iter()
               .any(|(origin_module, connections)| {
-                if let Some(origin_module) = origin_module {
-                  connections.iter().any(|c| {
-                    c.is_target_active(
-                      module_graph,
-                      Some(chunk.runtime()),
-                      module_graph_cache,
-                      &compilation.exports_info_artifact,
-                    )
-                  }) && compilation
-                    .build_chunk_graph_artifact
-                    .chunk_graph
-                    .get_module_runtimes_iter(
-                      *origin_module,
-                      &compilation.build_chunk_graph_artifact.chunk_by_ukey,
-                    )
-                    .any(|runtime| runtime.intersection(chunk.runtime()).count() > 0)
-                } else {
-                  false
-                }
+                connections.iter().any(|c| {
+                  c.is_target_active(
+                    module_graph,
+                    Some(chunk.runtime()),
+                    module_graph_cache,
+                    &compilation
+                      .build_module_graph_artifact
+                      .side_effects_state_artifact,
+                    &compilation.exports_info_artifact,
+                  )
+                }) && compilation
+                  .build_chunk_graph_artifact
+                  .chunk_graph
+                  .get_module_runtimes_iter(
+                    *origin_module,
+                    &compilation.build_chunk_graph_artifact.chunk_by_ukey,
+                  )
+                  .any(|runtime| runtime.intersection(chunk.runtime()).count() > 0)
               })
           } {
             buf2.push(
@@ -1032,7 +1030,7 @@ var {} = {{}};
       RESERVED_NAMES.iter().map(|item| Atom::new(*item)).collect();
     let mut renamed_inline_modules: IdentifierMap<Arc<dyn Source>> = IdentifierMap::default();
 
-    let render_module_results = rspack_futures::scope::<_, _>(|token| {
+    let render_module_results = rspack_parallel::scope::<_, _>(|token| {
       all_modules.iter().for_each(|module| {
         let s = unsafe {
           token.used((
@@ -1136,7 +1134,7 @@ var {} = {{}};
                 Arc::new(FileName::Custom(m.identifier().to_string())),
                 code.source().into_string_lossy().into_owned(),
               );
-              let comments = swc_node_comments::SwcComments::default();
+              let comments = SingleThreadedComments::default();
               let mut errors = vec![];
 
               if let Ok(program) = swc_core::ecma::parser::parse_file_as_program(
@@ -1309,7 +1307,7 @@ var {} = {{}};
         continue;
       }
 
-      let mut binding_to_ref: HashMap<(Atom, SyntaxContext), Vec<ConcatenatedModuleIdent>> =
+      let mut binding_to_ref: FxHashMap<(Atom, SyntaxContext), Vec<ConcatenatedModuleIdent>> =
         HashMap::default();
 
       for module_scope_ident in module_scope_idents.iter() {

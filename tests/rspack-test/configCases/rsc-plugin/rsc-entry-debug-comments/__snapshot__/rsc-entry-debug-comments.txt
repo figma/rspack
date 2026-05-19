@@ -1,0 +1,17 @@
+server
+"use strict";
+/*!
+ * module: ./src/Client.js
+ * exports: Client
+ */
+
+client
+"use strict";
+/*!
+ * module: ./src/App.css
+ * exports: side-effect
+ */
+/*!
+ * module: ./src/Client.js
+ * exports: Client
+ */

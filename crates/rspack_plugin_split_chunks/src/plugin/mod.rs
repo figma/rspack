@@ -7,22 +7,23 @@ mod module_group;
 use std::{borrow::Cow, cmp::Ordering, fmt::Debug};
 
 use itertools::Itertools;
-use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
-use rspack_collections::{DatabaseItem, IdentifierMap, UkeyMap, UkeySet};
+use rayon::iter::{IntoParallelRefIterator, IntoParallelRefMutIterator, ParallelIterator};
+use rspack_collections::IdentifierMap;
 use rspack_core::{ChunkUkey, Compilation, CompilationOptimizeChunks, Logger, Plugin};
 use rspack_error::Result;
 use rspack_hook::{plugin, plugin_hook};
 use rspack_util::{fx_hash::FxIndexMap, tracing_preset::TRACING_BENCH_TARGET};
+use rustc_hash::{FxHashMap, FxHashSet};
 use tracing::instrument;
 
 use crate::{
   CacheGroup, SplitChunkSizes,
   common::FallbackCacheGroup,
   get_module_sizes,
-  module_group::{IndexedCacheGroup, ModuleGroup},
+  module_group::{IndexedCacheGroup, ModuleGroup, ModuleGroupKey},
 };
 
-type ModuleGroupMap = FxIndexMap<String, ModuleGroup>;
+type ModuleGroupMap = FxIndexMap<ModuleGroupKey, ModuleGroup>;
 
 #[derive(Debug)]
 pub struct PluginOptions {
@@ -57,14 +58,15 @@ impl SplitChunksPlugin {
       .modules_keys()
       .copied()
       .collect::<Vec<_>>();
-    // Sort modules to ensure deterministic processing order
-    all_modules.sort_unstable();
+    // Sort modules to ensure deterministic processing order.
+    // Use the precomputed identifier hash first to avoid repeated long string comparisons.
+    all_modules.sort_unstable_by_key(|module| (module.precomputed_hash(), *module));
 
     let module_sizes = get_module_sizes(all_modules.par_iter().copied(), compilation);
     let module_chunks = Self::get_module_chunks(&all_modules, compilation);
     logger.time_end(start);
 
-    let chunk_index_map: UkeyMap<ChunkUkey, u64> = {
+    let chunk_index_map: FxHashMap<ChunkUkey, u32> = {
       let mut ordered_chunks = compilation
         .build_chunk_graph_artifact
         .chunk_by_ukey
@@ -95,7 +97,12 @@ impl SplitChunksPlugin {
       ordered_chunks
         .iter()
         .enumerate()
-        .map(|(index, chunk)| (chunk.ukey(), index as u64 + 1))
+        .map(|(index, chunk)| {
+          (
+            chunk.ukey(),
+            u32::try_from(index + 1).expect("chunk index should fit in u32"),
+          )
+        })
         .collect()
     };
 
@@ -107,7 +114,7 @@ impl SplitChunksPlugin {
       .iter()
       .enumerate()
       .map(|v| IndexedCacheGroup {
-        cache_group_index: v.0,
+        cache_group_index: u32::try_from(v.0).expect("cache group index should fit in u32"),
         cache_group: v.1,
       })
       .sorted_by(|a, b| match b.compare_by_priority(a) {
@@ -119,8 +126,8 @@ impl SplitChunksPlugin {
       priority_cache_groups.push((priority, cache_groups.into_iter().collect::<Vec<_>>()));
     }
 
-    let mut max_size_setting_map: UkeyMap<ChunkUkey, MaxSizeSetting> = Default::default();
-    let mut removed_module_chunks: IdentifierMap<UkeySet<ChunkUkey>> = IdentifierMap::default();
+    let mut max_size_setting_map: FxHashMap<ChunkUkey, MaxSizeSetting> = Default::default();
+    let mut removed_module_chunks: IdentifierMap<FxHashSet<ChunkUkey>> = IdentifierMap::default();
 
     let mut combinator = module_group::Combinator::default();
 
@@ -164,6 +171,9 @@ impl SplitChunksPlugin {
         .await?;
       tracing::trace!("prepared module_group_map {:#?}", module_group_map);
 
+      module_group_map
+        .par_iter_mut()
+        .for_each(|(_, module_group)| module_group.prepare_modules_for_sizes_and_compare());
       self.ensure_min_size_fit(&mut module_group_map, &module_sizes);
 
       while !module_group_map.is_empty() {
@@ -214,9 +224,18 @@ impl SplitChunksPlugin {
           module_group.chunks.remove(&new_chunk);
         }
 
+        // If the module group size exceeds enforceSizeThreshold, skip maxRequest constraints
+        // https://webpack.js.org/plugins/split-chunks-plugin/#splitchunksenforcesizethreshold
+        let enforce_size_exceeded = !cache_group.enforce_size_threshold.is_empty()
+          && module_group
+            .get_sizes(&module_sizes)
+            .bigger_than(&cache_group.enforce_size_threshold);
+
         let mut used_chunks = Cow::Borrowed(&module_group.chunks);
 
-        self.ensure_max_request_fit(compilation, cache_group, &mut used_chunks);
+        if !enforce_size_exceeded {
+          self.ensure_max_request_fit(compilation, cache_group, &mut used_chunks);
+        }
 
         if used_chunks.len() != module_group.chunks.len() {
           // There are some chunks removed by `ensure_max_request_fit`
@@ -299,11 +318,6 @@ impl Debug for SplitChunksPlugin {
 #[plugin_hook(CompilationOptimizeChunks for SplitChunksPlugin, stage = Compilation::OPTIMIZE_CHUNKS_STAGE_ADVANCED)]
 async fn optimize_chunks(&self, compilation: &mut Compilation) -> Result<Option<bool>> {
   self.inner_impl(compilation).await?;
-  compilation
-    .build_chunk_graph_artifact
-    .chunk_graph
-    .generate_dot(compilation, "after-split-chunks")
-    .await;
   Ok(None)
 }
 

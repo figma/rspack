@@ -1,5 +1,6 @@
 ---
 source: crates/rspack/tests/defaults.rs
+assertion_line: 22
 expression: options
 ---
 CompilerOptions {
@@ -160,9 +161,7 @@ CompilerOptions {
             [],
         ),
         roots: Some(
-            [
-                "<cwd>",
-            ],
+            [],
         ),
         restrictions: None,
         imports_fields: Some(
@@ -180,7 +179,6 @@ CompilerOptions {
                             [
                                 ".js",
                                 ".json",
-                                ".wasm",
                             ],
                         ),
                         alias: None,
@@ -222,7 +220,6 @@ CompilerOptions {
                         description_files: None,
                         enforce_extension: None,
                         pnp: None,
-                        pnp_manifest: None,
                         builtin_modules: false,
                     },
                     "esm": Resolve {
@@ -230,7 +227,6 @@ CompilerOptions {
                             [
                                 ".js",
                                 ".json",
-                                ".wasm",
                             ],
                         ),
                         alias: None,
@@ -272,7 +268,6 @@ CompilerOptions {
                         description_files: None,
                         enforce_extension: None,
                         pnp: None,
-                        pnp_manifest: None,
                         builtin_modules: false,
                     },
                     "loaderImport": Resolve {
@@ -280,7 +275,6 @@ CompilerOptions {
                             [
                                 ".js",
                                 ".json",
-                                ".wasm",
                             ],
                         ),
                         alias: None,
@@ -322,7 +316,6 @@ CompilerOptions {
                         description_files: None,
                         enforce_extension: None,
                         pnp: None,
-                        pnp_manifest: None,
                         builtin_modules: false,
                     },
                     "url": Resolve {
@@ -350,7 +343,6 @@ CompilerOptions {
                         description_files: None,
                         enforce_extension: None,
                         pnp: None,
-                        pnp_manifest: None,
                         builtin_modules: false,
                     },
                     "worker": Resolve {
@@ -358,7 +350,6 @@ CompilerOptions {
                             [
                                 ".js",
                                 ".json",
-                                ".wasm",
                             ],
                         ),
                         alias: None,
@@ -402,7 +393,6 @@ CompilerOptions {
                         description_files: None,
                         enforce_extension: None,
                         pnp: None,
-                        pnp_manifest: None,
                         builtin_modules: false,
                     },
                     "commonjs": Resolve {
@@ -410,7 +400,6 @@ CompilerOptions {
                             [
                                 ".js",
                                 ".json",
-                                ".wasm",
                             ],
                         ),
                         alias: None,
@@ -452,7 +441,6 @@ CompilerOptions {
                         description_files: None,
                         enforce_extension: None,
                         pnp: None,
-                        pnp_manifest: None,
                         builtin_modules: false,
                     },
                     "amd": Resolve {
@@ -460,7 +448,6 @@ CompilerOptions {
                             [
                                 ".js",
                                 ".json",
-                                ".wasm",
                             ],
                         ),
                         alias: None,
@@ -502,7 +489,6 @@ CompilerOptions {
                         description_files: None,
                         enforce_extension: None,
                         pnp: None,
-                        pnp_manifest: None,
                         builtin_modules: false,
                     },
                     "loader": Resolve {
@@ -510,7 +496,6 @@ CompilerOptions {
                             [
                                 ".js",
                                 ".json",
-                                ".wasm",
                             ],
                         ),
                         alias: None,
@@ -552,7 +537,6 @@ CompilerOptions {
                         description_files: None,
                         enforce_extension: None,
                         pnp: None,
-                        pnp_manifest: None,
                         builtin_modules: false,
                     },
                     "unknown": Resolve {
@@ -560,7 +544,6 @@ CompilerOptions {
                             [
                                 ".js",
                                 ".json",
-                                ".wasm",
                             ],
                         ),
                         alias: None,
@@ -602,7 +585,6 @@ CompilerOptions {
                         description_files: None,
                         enforce_extension: None,
                         pnp: None,
-                        pnp_manifest: None,
                         builtin_modules: false,
                     },
                 },
@@ -611,7 +593,6 @@ CompilerOptions {
         description_files: None,
         enforce_extension: None,
         pnp: None,
-        pnp_manifest: None,
         builtin_modules: false,
     },
     resolve_loader: Resolve {
@@ -662,7 +643,6 @@ CompilerOptions {
         description_files: None,
         enforce_extension: None,
         pnp: None,
-        pnp_manifest: None,
         builtin_modules: false,
     },
     module: ModuleOptions {
@@ -727,7 +707,10 @@ CompilerOptions {
                         ModuleRule {
                             rspack_resource: None,
                             test: Some(
-                                "Func(...)",
+                                RspackRegex {
+                                    flags: "",
+                                    source: "\\.json$",
+                                },
                             ),
                             include: None,
                             exclude: None,
@@ -800,7 +783,10 @@ CompilerOptions {
                         ModuleRule {
                             rspack_resource: None,
                             test: Some(
-                                "Func(...)",
+                                RspackRegex {
+                                    flags: "",
+                                    source: "\\.mjs$",
+                                },
                             ),
                             include: None,
                             exclude: None,
@@ -873,7 +859,6 @@ CompilerOptions {
                                                         description_files: None,
                                                         enforce_extension: None,
                                                         pnp: None,
-                                                        pnp_manifest: None,
                                                         builtin_modules: false,
                                                     },
                                                 },
@@ -882,7 +867,6 @@ CompilerOptions {
                                         description_files: None,
                                         enforce_extension: None,
                                         pnp: None,
-                                        pnp_manifest: None,
                                         builtin_modules: false,
                                     },
                                 ),
@@ -894,7 +878,10 @@ CompilerOptions {
                         ModuleRule {
                             rspack_resource: None,
                             test: Some(
-                                "Func(...)",
+                                RspackRegex {
+                                    flags: "",
+                                    source: "\\.js$",
+                                },
                             ),
                             include: None,
                             exclude: None,
@@ -976,7 +963,6 @@ CompilerOptions {
                                                         description_files: None,
                                                         enforce_extension: None,
                                                         pnp: None,
-                                                        pnp_manifest: None,
                                                         builtin_modules: false,
                                                     },
                                                 },
@@ -985,7 +971,6 @@ CompilerOptions {
                                         description_files: None,
                                         enforce_extension: None,
                                         pnp: None,
-                                        pnp_manifest: None,
                                         builtin_modules: false,
                                     },
                                 ),
@@ -997,7 +982,10 @@ CompilerOptions {
                         ModuleRule {
                             rspack_resource: None,
                             test: Some(
-                                "Func(...)",
+                                RspackRegex {
+                                    flags: "",
+                                    source: "\\.cjs$",
+                                },
                             ),
                             include: None,
                             exclude: None,
@@ -1031,7 +1019,10 @@ CompilerOptions {
                         ModuleRule {
                             rspack_resource: None,
                             test: Some(
-                                "Func(...)",
+                                RspackRegex {
+                                    flags: "",
+                                    source: "\\.js$",
+                                },
                             ),
                             include: None,
                             exclude: None,
@@ -1161,7 +1152,6 @@ CompilerOptions {
                                                         description_files: None,
                                                         enforce_extension: None,
                                                         pnp: None,
-                                                        pnp_manifest: None,
                                                         builtin_modules: false,
                                                     },
                                                 },
@@ -1170,7 +1160,6 @@ CompilerOptions {
                                         description_files: None,
                                         enforce_extension: None,
                                         pnp: None,
-                                        pnp_manifest: None,
                                         builtin_modules: false,
                                     },
                                 ),
@@ -1182,7 +1171,10 @@ CompilerOptions {
                         ModuleRule {
                             rspack_resource: None,
                             test: Some(
-                                "Func(...)",
+                                RspackRegex {
+                                    flags: "",
+                                    source: "\\.wasm$",
+                                },
                             ),
                             include: None,
                             exclude: None,
@@ -1258,7 +1250,6 @@ CompilerOptions {
                                                     description_files: None,
                                                     enforce_extension: None,
                                                     pnp: None,
-                                                    pnp_manifest: None,
                                                     builtin_modules: false,
                                                 },
                                             ),
@@ -1368,7 +1359,6 @@ CompilerOptions {
                                                     description_files: None,
                                                     enforce_extension: None,
                                                     pnp: None,
-                                                    pnp_manifest: None,
                                                     builtin_modules: false,
                                                 },
                                             ),
@@ -1686,6 +1676,8 @@ CompilerOptions {
                                 false,
                             ),
                             defer_import: None,
+                            import_meta_resolve: None,
+                            side_effects_free: None,
                         },
                     ),
                 },
@@ -1713,6 +1705,7 @@ CompilerOptions {
     experiments: Experiments {
         css: false,
         defer_import: false,
+        pure_functions: false,
     },
     incremental: IncrementalOptions {
         silent: true,
@@ -1728,7 +1721,6 @@ CompilerOptions {
         },
     ),
     optimization: Optimization {
-        remove_available_modules: false,
         side_effects: Flag,
         provided_exports: true,
         used_exports: False,

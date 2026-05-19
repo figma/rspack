@@ -1,13 +1,12 @@
 use std::{
   path::PathBuf,
-  rc::Rc,
   sync::{Arc, LazyLock},
 };
 
 use atomic_refcell::AtomicRefCell;
 use regex::Regex;
 use rspack_collections::{
-  Identifiable, Identifier, IdentifierIndexMap, IdentifierMap, IdentifierSet, UkeyMap, UkeySet,
+  Identifiable, Identifier, IdentifierIndexMap, IdentifierMap, IdentifierSet,
 };
 use rspack_core::{
   ApplyContext, AssetInfo, AsyncModulesArtifact, BoxModule, BuildModuleGraphArtifact, ChunkUkey,
@@ -19,9 +18,9 @@ use rspack_core::{
   ConcatenatedModuleInfo, ConcatenationScope, DependencyType, ExportsInfoArtifact,
   ExternalModuleInfo, GetTargetResult, Logger, ModuleFactoryCreateData, ModuleGraph,
   ModuleIdentifier, ModuleInfo, ModuleType, NormalModuleFactoryAfterFactorize,
-  NormalModuleFactoryParser, ParserAndGenerator, ParserOptions, Plugin, PrefetchExportsInfoMode,
-  RuntimeCodeTemplate, RuntimeGlobals, RuntimeModule, SideEffectsOptimizeArtifact, get_target,
-  is_esm_dep_like,
+  NormalModuleFactoryParser, ParserAndGenerator, ParserOptions, Plugin, REQUIRE_SCOPE_GLOBALS,
+  RuntimeCodeTemplate, RuntimeGlobals, RuntimeModule, SideEffectsOptimizeArtifact,
+  SideEffectsStateArtifact, get_target, is_esm_dep_like,
   rspack_sources::{ReplaceSource, Source},
 };
 use rspack_error::{Diagnostic, Result};
@@ -44,7 +43,7 @@ use crate::{
   esm_lib_parser_plugin::EsmLibParserPlugin,
   optimize_chunks::{
     analyze_dyn_import_targets, assign_dyn_import_chunk_short_names, ensure_entry_exports,
-    optimize_runtime_chunks,
+    extract_tla_shared_modules, optimize_runtime_chunks,
   },
   preserve_modules::preserve_modules,
   runtime::EsmRegisterModuleRuntimeModule,
@@ -65,9 +64,9 @@ pub struct EsmLibraryPlugin {
   pub(crate) concatenated_modules_map_for_codegen:
     AtomicRefCell<Arc<IdentifierIndexMap<ModuleInfo>>>,
   pub(crate) concatenated_modules_map: RwLock<IdentifierIndexMap<ModuleInfo>>,
-  pub(crate) links: AtomicRefCell<UkeyMap<ChunkUkey, ChunkLinkContext>>,
+  pub(crate) links: AtomicRefCell<FxHashMap<ChunkUkey, ChunkLinkContext>>,
   pub(crate) chunk_ids_to_ukey: AtomicRefCell<FxHashMap<String, ChunkUkey>>,
-  pub(crate) strict_export_chunks: AtomicRefCell<UkeySet<ChunkUkey>>,
+  pub(crate) strict_export_chunks: AtomicRefCell<FxHashSet<ChunkUkey>>,
   pub(crate) all_dyn_targets: AtomicRefCell<IdentifierSet>,
   pub(crate) namespace_targets: AtomicRefCell<IdentifierSet>,
   /// module_id → namespace export name in the chunk, for modules whose exports
@@ -100,7 +99,7 @@ impl EsmLibraryPlugin {
     let mut modules_map = IdentifierIndexMap::default();
     let modules = module_graph.modules();
     let mut modules = modules.collect::<Vec<_>>();
-    modules.sort_by(|(m1, _), (m2, _)| m1.cmp(m2));
+    modules.sort_by_key(|(m1, _)| *m1);
     let logger = compilation.get_logger("rspack.EsmLibraryPlugin");
 
     for (idx, (module_identifier, module)) in modules.into_iter().enumerate() {
@@ -140,8 +139,7 @@ impl EsmLibraryPlugin {
 
       // if we reach here, check exports info
       if should_scope_hoisting {
-        let exports_info = exports_info_artifact
-          .get_prefetched_exports_info(module_identifier, PrefetchExportsInfoMode::Default);
+        let exports_info = exports_info_artifact.get_exports_info_data(module_identifier);
 
         let relevant_exports = exports_info.get_relevant_exports(None);
         let unknown_exports = relevant_exports
@@ -153,7 +151,7 @@ impl EsmLibraryPlugin {
                   export_info,
                   module_graph,
                   exports_info_artifact,
-                  Rc::new(|_| true),
+                  &|_| true,
                   &mut Default::default()
                 ),
                 Some(GetTargetResult::Target(_))
@@ -296,11 +294,12 @@ async fn finish_modules(
   compilation: &Compilation,
   _async_modules_artifact: &mut AsyncModulesArtifact,
   exports_info_artifact: &mut ExportsInfoArtifact,
+  _side_effects_state_artifact: &mut SideEffectsStateArtifact,
 ) -> Result<()> {
   let module_graph = compilation.get_module_graph();
   let mut modules_map = IdentifierIndexMap::default();
   let mut modules = module_graph.modules().collect::<Vec<_>>();
-  modules.sort_by(|(m1, _), (m2, _)| m1.cmp(m2));
+  modules.sort_by_key(|(m1, _)| *m1);
   let logger = compilation.get_logger("rspack.EsmLibraryPlugin");
 
   for (idx, (module_identifier, module)) in modules.into_iter().enumerate() {
@@ -340,8 +339,7 @@ async fn finish_modules(
 
     // if we reach here, check exports info
     if should_scope_hoisting {
-      let exports_info = exports_info_artifact
-        .get_prefetched_exports_info(module_identifier, PrefetchExportsInfoMode::Default);
+      let exports_info = exports_info_artifact.get_exports_info_data(module_identifier);
 
       let relevant_exports = exports_info.get_relevant_exports(None);
       let unknown_exports = relevant_exports
@@ -353,7 +351,7 @@ async fn finish_modules(
                 export_info,
                 module_graph,
                 exports_info_artifact,
-                Rc::new(|_| true),
+                &|_| true,
                 &mut Default::default()
               ),
               Some(GetTargetResult::Target(_))
@@ -521,8 +519,16 @@ async fn additional_chunk_runtime_requirements(
     }
   }
 
-  if !runtime_requirements.is_empty() {
-    runtime_requirements.insert(RuntimeGlobals::REQUIRE);
+  // Add REQUIRE_SCOPE only when runtime_requirements actually contain globals
+  // that live on the __webpack_require__ object (same check the runtime plugin
+  // uses in handle_scope_globals). This avoids pulling in an empty
+  // `var __webpack_require__ = {};` for chunks whose only requirements are
+  // unrelated to the require scope (e.g. STARTUP_NO_DEFAULT added at tree level).
+  if runtime_requirements
+    .iter()
+    .any(|r| REQUIRE_SCOPE_GLOBALS.contains(r))
+  {
+    runtime_requirements.insert(RuntimeGlobals::REQUIRE_SCOPE);
   }
 
   Ok(())
@@ -538,7 +544,7 @@ async fn runtime_requirements_in_tree(
   _runtime_requirements_mut: &mut RuntimeGlobals,
   runtime_modules_to_add: &mut Vec<(ChunkUkey, Box<dyn RuntimeModule>)>,
 ) -> Result<Option<()>> {
-  if runtime_requirements.contains(RuntimeGlobals::REQUIRE) {
+  if runtime_requirements.contains(RuntimeGlobals::MODULE_FACTORIES) {
     runtime_modules_to_add.push((
       *chunk_ukey,
       Box::new(EsmRegisterModuleRuntimeModule::new(
@@ -565,7 +571,7 @@ async fn additional_tree_runtime_requirements(
 }
 
 static RSPACK_ESM_CHUNK_PLACEHOLDER_RE: LazyLock<Regex> =
-  LazyLock::new(|| Regex::new(r##"__RSPACK_ESM_CHUNK_[^'"]+"##).expect("should have regex"));
+  LazyLock::new(|| Regex::new(r##"__RSPACK_ESM_CHUNK_[^'"\\]+"##).expect("should have regex"));
 
 #[plugin_hook(CompilationProcessAssets for EsmLibraryPlugin, stage = Compilation::PROCESS_ASSETS_STAGE_AFTER_OPTIMIZE_HASH)]
 async fn process_assets(&self, compilation: &mut Compilation) -> Result<()> {
@@ -614,7 +620,11 @@ async fn process_assets(&self, compilation: &mut Compilation) -> Result<()> {
             .get(chunk_ukey)
             .expect("should have chunk for chunk ukey")
         }) else {
-          unreachable!("This should not happen, please file an issue");
+          return Err(rspack_error::error!(
+            "chunk_id '{}' not found in chunk_ids_to_ukey. Available: {:?}",
+            chunk_id,
+            chunk_ids_to_ukey.keys().collect::<Vec<_>>()
+          ));
         };
 
         let js_files = chunk
@@ -636,11 +646,11 @@ async fn process_assets(&self, compilation: &mut Compilation) -> Result<()> {
         }
         if js_files.is_empty() {
           return Err(rspack_error::error!(
-            "chunk {:?} should have at least one file",
-            chunk.id()
+            "chunk {} should have at least one file",
+            chunk_id
           ));
         }
-        let chunk_path = output_path.join(js_files.first().expect("should have at least one file"));
+        let chunk_path = output_path.join(js_files.first().expect("have at least one file"));
         let relative = chunk_path.relative(self_path.as_path());
         let relative = relative
           .to_slash()
@@ -683,6 +693,18 @@ async fn optimize_chunks(&self, compilation: &mut Compilation) -> Result<Option<
     }
   } else if let Some(cache_groups) = &self.split_chunks {
     crate::split_chunks::split(cache_groups, compilation).await?;
+  }
+
+  let extracted_tla_shared = extract_tla_shared_modules(compilation);
+  if extracted_tla_shared {
+    compilation.push_diagnostic(rspack_error::Diagnostic::warn(
+      "EsmLibraryPlugin".into(),
+      "Top-level await with shared modules caused a circular dependency between async and \
+       parent chunks. The shared modules have been extracted into separate chunks to break \
+       the cycle. After bundling, the execution order of top-level await may differ from the \
+       original source, which could lead to incorrect runtime behavior."
+        .into(),
+    ));
   }
 
   ensure_entry_exports(compilation);
@@ -734,7 +756,9 @@ async fn after_factorize(
 ) -> Result<()> {
   // Check if this is an external module using the existing downcast helper
   if let Some(external_module) = module.as_external_module_mut()
-    && external_module.get_external_type().starts_with("module")
+    && (external_module.get_external_type().starts_with("module")
+      || (external_module.get_external_type() == "modern-module"
+        && data.dependencies.first().is_some_and(is_esm_dep_like)))
   {
     // If there's an issuer, append it to the module id
     if let Some(issuer_identifier) = &data.issuer_identifier {

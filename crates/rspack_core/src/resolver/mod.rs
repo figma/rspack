@@ -4,7 +4,6 @@ mod resolver_impl;
 use std::{
   borrow::Borrow,
   fmt,
-  path::PathBuf,
   sync::{Arc, LazyLock},
 };
 
@@ -14,12 +13,13 @@ use rspack_fs::ReadableFileSystem;
 use rspack_loader_runner::{DescriptionData, ResourceData};
 use rspack_paths::{AssertUtf8, Utf8PathBuf};
 use rspack_util::identifier::insert_zero_width_space_for_fragment;
-use rustc_hash::FxHashSet;
 use sugar_path::SugarPath;
 
 pub use self::{
   factory::{ResolveOptionsWithDependencyType, ResolverFactory},
-  resolver_impl::{ResolveContext, ResolveInnerError, ResolveInnerOptions, Resolver},
+  resolver_impl::{
+    ResolveContext, ResolveDependencies, ResolveInnerError, ResolveInnerOptions, Resolver,
+  },
 };
 use crate::{
   Context, DependencyCategory, DependencyRange, DependencyType, ModuleIdentifier, Resolve,
@@ -44,8 +44,6 @@ pub struct ResolveArgs<'a> {
   pub resolve_options: Option<Arc<Resolve>>,
   pub resolve_to_context: bool,
   pub optional: bool,
-  pub file_dependencies: &'a mut FxHashSet<PathBuf>,
-  pub missing_dependencies: &'a mut FxHashSet<PathBuf>,
 }
 
 /// A successful path resolution or an ignored path.
@@ -165,7 +163,7 @@ pub async fn resolve_for_error_hints(
       return Some(format!("Did you mean '{}'?
 
 The request '{}' failed to resolve only because it was resolved as fully specified,
-probably because the origin is strict EcmaScript Module,
+probably because the origin is strict ECMAScript Module,
 e. g. a module with javascript mimetype, a '*.mjs' file, or a '*.js' file where the package.json contains '\"type\": \"module\"'.
 
 The extension in the request is mandatory for it to be fully specified.
@@ -311,7 +309,7 @@ if its extension was not listed in the `resolve.extensions`. Here're some possib
 pub async fn resolve(
   args: ResolveArgs<'_>,
   plugin_driver: &SharedPluginDriver,
-) -> Result<ResolveResult, Error> {
+) -> (Result<ResolveResult, Error>, ResolveDependencies) {
   let dep = ResolveOptionsWithDependencyType {
     resolve_options: args
       .resolve_options
@@ -321,12 +319,11 @@ pub async fn resolve(
     dependency_category: *args.dependency_category,
   };
 
-  let mut context = Default::default();
   let resolver = plugin_driver.resolver_factory.get(dep);
-  let mut result = resolver
-    .resolve_with_context(args.context.as_ref(), args.specifier, &mut context)
-    .await
-    .map_err(|error| error.into_resolve_error(&args));
+  let (result, dependencies) = resolver
+    .resolve_with_context(args.context.as_ref(), args.specifier)
+    .await;
+  let mut result = result.map_err(|error| error.into_resolve_error(&args));
 
   if let Err(ref err) = result {
     tracing::error!(
@@ -340,11 +337,6 @@ pub async fn resolve(
     );
   }
 
-  args.file_dependencies.extend(context.file_dependencies);
-  args
-    .missing_dependencies
-    .extend(context.missing_dependencies);
-
   if result.is_err()
     && let Some(hint) = resolve_for_error_hints(args, plugin_driver, resolver.inner_fs()).await
   {
@@ -354,5 +346,5 @@ pub async fn resolve(
     })
   };
 
-  result
+  (result, dependencies)
 }

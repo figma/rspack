@@ -1,5 +1,6 @@
 ```mjs title=main.mjs
 import { __webpack_require__ } from "./runtime.mjs";
+
 __webpack_require__.add({
 "./foo.cjs"
 /*!*****************!*\
@@ -42,6 +43,7 @@ it('should have correct import', () => {
 
 // ./index.js
 
+export {};
 
 ```
 
