@@ -12,12 +12,11 @@ use swc_core::{
 };
 use url::Url;
 
-use super::JavascriptParserPlugin;
+use super::{JavascriptParserPlugin, inner_graph::state::InnerGraphUsageOperation};
 use crate::{
-  InnerGraphPlugin,
+  InnerGraphParserPlugin,
   dependency::{URLContextDependency, URLDependency},
   magic_comment::try_extract_magic_comment,
-  parser_plugin::inner_graph::state::InnerGraphUsageOperation,
   visitors::{ExprRef, JavascriptParser, context_reg_exp, create_context_dependency},
 };
 
@@ -103,6 +102,7 @@ pub struct URLPlugin {
   pub mode: Option<JavascriptParserUrl>,
 }
 
+#[rspack_macros::implemented_javascript_parser_hooks]
 impl JavascriptParserPlugin for URLPlugin {
   fn can_rename(&self, _parser: &mut JavascriptParser, for_name: &str) -> Option<bool> {
     (for_name == "URL").then_some(true)
@@ -163,7 +163,7 @@ impl JavascriptParserPlugin for URLPlugin {
       );
       let dep_idx = parser.next_dependency_idx();
       parser.add_dependency(Box::new(dep));
-      InnerGraphPlugin::on_usage(parser, InnerGraphUsageOperation::URLDependency(dep_idx));
+      InnerGraphParserPlugin::on_usage(parser, InnerGraphUsageOperation::URLDependency(dep_idx));
       return Some(true);
     }
 
@@ -198,7 +198,7 @@ impl JavascriptParserPlugin for URLPlugin {
       replaces: result.replaces,
       start: expr.span().real_lo(),
       end: expr.span().real_hi(),
-      referenced_exports: None,
+      referenced_specifiers: None,
       attributes: None,
       phase: None,
     };

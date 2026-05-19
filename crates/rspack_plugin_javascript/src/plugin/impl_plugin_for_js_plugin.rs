@@ -29,8 +29,9 @@ use crate::{
     ExportInfoDependencyTemplate, ExternalModuleDependencyTemplate,
     ImportContextDependencyTemplate, ImportDependencyTemplate, ImportEagerDependencyTemplate,
     ImportMetaContextDependencyTemplate, ImportMetaHotAcceptDependencyTemplate,
-    ImportMetaHotDeclineDependencyTemplate, ImportMetaResolveDependencyTemplate,
-    ImportMetaResolveHeaderDependencyTemplate, IsIncludedDependencyTemplate,
+    ImportMetaHotDeclineDependencyTemplate, ImportMetaResolveContextDependencyTemplate,
+    ImportMetaResolveDependencyTemplate, ImportMetaResolveHeaderDependencyTemplate,
+    ImportMetaRscDependencyTemplate, ImportWeakDependencyTemplate, IsIncludedDependencyTemplate,
     ModuleArgumentDependencyTemplate, ModuleDecoratorDependencyTemplate,
     ModuleHotAcceptDependencyTemplate, ModuleHotDeclineDependencyTemplate,
     ProvideDependencyTemplate, PureExpressionDependencyTemplate, RequireContextDependencyTemplate,
@@ -61,6 +62,10 @@ async fn compilation(
   );
   compilation.set_dependency_factory(
     DependencyType::EsmImportSpecifier,
+    params.normal_module_factory.clone(),
+  );
+  compilation.set_dependency_factory(
+    DependencyType::ImportMetaRsc,
     params.normal_module_factory.clone(),
   );
   compilation.set_dependency_factory(
@@ -137,6 +142,10 @@ async fn compilation(
     params.context_module_factory.clone(),
   );
   compilation.set_dependency_factory(
+    DependencyType::ImportMetaResolveContext,
+    params.context_module_factory.clone(),
+  );
+  compilation.set_dependency_factory(
     DependencyType::ImportMetaResolve,
     params.normal_module_factory.clone(),
   );
@@ -148,6 +157,10 @@ async fn compilation(
 
   compilation.set_dependency_factory(
     DependencyType::DynamicImportEager,
+    params.normal_module_factory.clone(),
+  );
+  compilation.set_dependency_factory(
+    DependencyType::DynamicImportWeak,
     params.normal_module_factory.clone(),
   );
   compilation.set_dependency_factory(
@@ -224,8 +237,16 @@ async fn compilation(
     Arc::new(ImportEagerDependencyTemplate::default()),
   );
   compilation.set_dependency_template(
+    ImportWeakDependencyTemplate::template_type(),
+    Arc::new(ImportWeakDependencyTemplate::default()),
+  );
+  compilation.set_dependency_template(
     ProvideDependencyTemplate::template_type(),
     Arc::new(ProvideDependencyTemplate::default()),
+  );
+  compilation.set_dependency_template(
+    ImportMetaRscDependencyTemplate::template_type(),
+    Arc::new(ImportMetaRscDependencyTemplate),
   );
 
   // amd dependency templates
@@ -311,6 +332,10 @@ async fn compilation(
   compilation.set_dependency_template(
     ImportMetaContextDependencyTemplate::template_type(),
     Arc::new(ImportMetaContextDependencyTemplate::default()),
+  );
+  compilation.set_dependency_template(
+    ImportMetaResolveContextDependencyTemplate::template_type(),
+    Arc::new(ImportMetaResolveContextDependencyTemplate::default()),
   );
   compilation.set_dependency_template(
     ImportMetaResolveDependencyTemplate::template_type(),

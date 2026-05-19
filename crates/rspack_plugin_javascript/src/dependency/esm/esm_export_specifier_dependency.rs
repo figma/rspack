@@ -4,9 +4,9 @@ use rspack_core::{
   AsContextDependency, AsModuleDependency, Dependency, DependencyCategory,
   DependencyCodeGeneration, DependencyId, DependencyLocation, DependencyRange, DependencyTemplate,
   DependencyTemplateType, DependencyType, ESMExportInitFragment, EvaluatedInlinableValue,
-  ExportNameOrSpec, ExportSpec, ExportsInfoArtifact, ExportsInfoGetter, ExportsOfExportsSpec,
-  ExportsSpec, GetUsedNameParam, LazyUntil, ModuleGraph, ModuleGraphCacheArtifact,
-  PrefetchExportsInfoMode, TSEnumValue, TemplateContext, TemplateReplaceSource, UsedName,
+  ExportNameOrSpec, ExportSpec, ExportsInfoArtifact, ExportsOfExportsSpec, ExportsSpec, LazyUntil,
+  ModuleGraph, ModuleGraphCacheArtifact, SideEffectsStateArtifact, TSEnumValue, TemplateContext,
+  TemplateReplaceSource, UsedName,
 };
 use swc_core::ecma::atoms::Atom;
 
@@ -105,6 +105,7 @@ impl Dependency for ESMExportSpecifierDependency {
     &self,
     _module_graph: &rspack_core::ModuleGraph,
     _module_graph_cache: &ModuleGraphCacheArtifact,
+    _side_effects_state_artifact: &SideEffectsStateArtifact,
     _module_chain: &mut IdentifierSet,
     _connection_state_cache: &mut IdentifierMap<rspack_core::ConnectionState>,
   ) -> rspack_core::ConnectionState {
@@ -193,9 +194,9 @@ impl DependencyTemplate for ESMExportSpecifierDependencyTemplate {
 
     let exports_info = compilation
       .exports_info_artifact
-      .get_prefetched_exports_info(&module.identifier(), PrefetchExportsInfoMode::Default);
-    let Some(used_name) = ExportsInfoGetter::get_used_name(
-      GetUsedNameParam::WithNames(&exports_info),
+      .get_exports_info_data(&module.identifier());
+    let Some(used_name) = exports_info.get_used_name(
+      &compilation.exports_info_artifact,
       *runtime,
       std::slice::from_ref(&dep.name),
     ) else {

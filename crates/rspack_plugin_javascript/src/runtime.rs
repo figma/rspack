@@ -2,12 +2,11 @@ use rayon::prelude::*;
 use rspack_core::{
   ChunkGraph, ChunkInitFragments, ChunkUkey, CodeGenerationPublicPathAutoReplace, Compilation,
   Module, ModuleCodeGenerationContext, RuntimeCodeTemplate, RuntimeGlobals, SourceType,
-  chunk_graph_chunk::ChunkId,
+  chunk_graph_chunk::ChunkIdSet,
   get_undo_path,
   rspack_sources::{BoxSource, ConcatSource, RawStringSource, ReplaceSource, Source, SourceExt},
 };
 use rspack_error::{Result, ToStringResultToRspackResultExt};
-use rustc_hash::FxHashSet as HashSet;
 
 use crate::{JavascriptModulesPluginHooks, RenderSource};
 
@@ -22,7 +21,7 @@ pub async fn render_chunk_modules(
   hooks: &JavascriptModulesPluginHooks,
   runtime_template: &RuntimeCodeTemplate<'_>,
 ) -> Result<Option<(BoxSource, ChunkInitFragments)>> {
-  let module_sources = rspack_futures::scope::<_, _>(|token| {
+  let module_sources = rspack_parallel::scope::<_, _>(|token| {
     ordered_modules.iter().for_each(|module| {
       let s = unsafe {
         token.used((
@@ -335,7 +334,7 @@ pub async fn render_runtime_modules(
   _runtime_template: &RuntimeCodeTemplate<'_>,
 ) -> Result<BoxSource> {
   let mut sources = ConcatSource::default();
-  let runtime_module_sources = rspack_futures::scope::<_, Result<_>>(|token| {
+  let runtime_module_sources = rspack_parallel::scope::<_, Result<_>>(|token| {
     compilation
       .build_chunk_graph_artifact
       .chunk_graph
@@ -411,16 +410,10 @@ pub async fn render_runtime_modules(
   Ok(sources.boxed())
 }
 
-pub fn stringify_chunks_to_array(chunks: &HashSet<ChunkId>) -> String {
+pub fn stringify_chunks_to_array(chunks: &ChunkIdSet) -> String {
   let mut v = chunks.iter().collect::<Vec<_>>();
   v.sort_unstable();
-
-  format!(
-    r#"[{}]"#,
-    v.iter().fold(String::new(), |prev, cur| {
-      prev + format!(r#""{cur}","#).as_str()
-    })
-  )
+  rspack_util::json_stringify(&v)
 }
 
 pub fn stringify_array(vec: &[String]) -> String {
@@ -432,4 +425,21 @@ pub fn stringify_array(vec: &[String]) -> String {
       .collect::<Vec<_>>()
       .join(", ")
   )
+}
+
+#[cfg(test)]
+mod tests {
+  use rspack_core::chunk_graph_chunk::ChunkIdSet;
+
+  use super::stringify_chunks_to_array;
+
+  #[test]
+  fn stringify_chunks_to_array_uses_chunk_id_serialize() {
+    let chunks = ChunkIdSet::from_iter([
+      rspack_core::chunk_graph_chunk::ChunkId::from("681"),
+      rspack_core::chunk_graph_chunk::ChunkId::from("main"),
+    ]);
+
+    assert_eq!(stringify_chunks_to_array(&chunks), "[681,\"main\"]");
+  }
 }

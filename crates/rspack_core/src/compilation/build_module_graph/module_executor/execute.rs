@@ -1,10 +1,10 @@
 use std::{collections::VecDeque, iter::once, sync::atomic::AtomicU32};
 
 use itertools::Itertools;
-use rspack_collections::{DatabaseItem, Identifier, IdentifierSet, UkeySet};
+use rspack_collections::{Identifier, IdentifierSet};
 use rspack_error::Error;
 use rspack_paths::ArcPathSet;
-use rustc_hash::FxHashMap as HashMap;
+use rustc_hash::{FxHashMap as HashMap, FxHashSet};
 use tokio::sync::oneshot::Sender;
 
 use super::context::{ExecutorTaskContext, ImportModuleMeta};
@@ -296,14 +296,14 @@ impl Task<ExecutorTaskContext> for ExecuteTask {
 
     create_module_hashes(&mut compilation, modules.clone()).await?;
 
-    code_generation_modules(&mut compilation, &mut None, modules.clone()).await?;
+    code_generation_modules(&mut compilation, None, modules.clone()).await?;
     let plugin_driver = compilation.plugin_driver.clone();
     process_modules_runtime_requirements(&mut compilation, modules.clone(), plugin_driver.clone())
       .await?;
     process_chunks_runtime_requirements(
       &mut compilation,
-      UkeySet::from_iter([chunk_ukey]),
-      UkeySet::from_iter([chunk_ukey]),
+      FxHashSet::from_iter([chunk_ukey]),
+      FxHashSet::from_iter([chunk_ukey]),
       plugin_driver,
     )
     .await?;

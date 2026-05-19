@@ -218,8 +218,6 @@ impl ContextModuleFactory {
     let dependency = data.dependencies[0]
       .as_context_dependency()
       .expect("should be context dependency");
-    let mut file_dependencies = Default::default();
-    let mut missing_dependencies = Default::default();
 
     let request = before_resolve_data.request;
     let (loader_request, specifier) = match request.rfind('!') {
@@ -290,11 +288,11 @@ impl ContextModuleFactory {
       resolve_options: data.resolve_options.clone(),
       resolve_to_context: true,
       optional: dependency.get_optional(),
-      file_dependencies: &mut file_dependencies,
-      missing_dependencies: &mut missing_dependencies,
     };
 
-    let resource_data = resolve(resolve_args, plugin_driver).await;
+    let (resource_data, resolve_dependencies) = resolve(resolve_args, plugin_driver).await;
+    let file_dependencies = resolve_dependencies.file_dependencies;
+    let missing_dependencies = resolve_dependencies.missing_dependencies;
 
     let (module, context_module_options) = match resource_data {
       Ok(ResolveResult::Resource(resource)) => {
@@ -422,12 +420,7 @@ async fn visit_dirs(
   resolve_options: &ResolveInnerOptions<'_>,
   fs: Arc<dyn ReadableFileSystem>,
 ) -> Result<()> {
-  if !fs
-    .metadata(dir)
-    .await
-    .map(|m| m.is_directory)
-    .unwrap_or(false)
-  {
+  if !fs.metadata(dir).await.is_ok_and(|m| m.is_directory) {
     return Ok(());
   }
   let include = &options.context_options.include;
@@ -443,12 +436,7 @@ async fn visit_dirs(
       continue;
     }
 
-    if fs
-      .metadata(&path)
-      .await
-      .map(|m| m.is_directory)
-      .unwrap_or(false)
-    {
+    if fs.metadata(&path).await.is_ok_and(|m| m.is_directory) {
       if options.context_options.recursive {
         visit_dirs(
           ctx,
@@ -517,7 +505,7 @@ async fn visit_dirs(
           options: options.context_options.clone(),
           resource_identifier,
           attributes: options.context_options.attributes.clone(),
-          referenced_exports: options.context_options.referenced_exports.clone(),
+          referenced_specifiers: options.context_options.referenced_specifiers.clone(),
           dependency_type: DependencyType::ContextElement(options.type_prefix),
           factorize_info: Default::default(),
         });

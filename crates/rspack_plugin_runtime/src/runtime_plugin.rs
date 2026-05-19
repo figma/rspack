@@ -4,7 +4,6 @@ use std::{
 };
 
 use atomic_refcell::AtomicRefCell;
-use rspack_collections::DatabaseItem;
 use rspack_core::{
   ChunkLoading, ChunkUkey, Compilation, CompilationId, CompilationParams,
   CompilationRuntimeRequirementInModule, CompilationRuntimeRequirementInTree, CompilerCompilation,
@@ -212,6 +211,7 @@ async fn runtime_requirements_in_tree(
   };
 
   let runtime_template = compilation.runtime_template.create_runtime_code_template();
+  #[allow(clippy::collapsible_match)]
   for runtime_requirement in runtime_requirements.iter() {
     match runtime_requirement {
       RuntimeGlobals::ASYNC_MODULE => {

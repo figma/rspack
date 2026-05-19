@@ -1,64 +1,21 @@
 use rspack_cacheable::{
   cacheable, cacheable_dyn,
-  with::{AsOption, AsPreset, AsVec},
+  with::{AsCacheable, AsOption, AsPreset, AsVec},
 };
 use rspack_core::{
-  AsContextDependency, Dependency, DependencyCategory, DependencyCodeGeneration, DependencyId,
-  DependencyRange, DependencyTemplate, DependencyTemplateType, DependencyType, ExportsInfoArtifact,
-  ExportsType, ExtendedReferencedExport, FactorizeInfo, ImportAttributes, ImportPhase,
-  ModuleDependency, ModuleGraph, ModuleGraphCacheArtifact, ReferencedExport, ResourceIdentifier,
+  AsContextDependency, Dependency, DependencyCategory, DependencyCodeGeneration,
+  DependencyCondition, DependencyId, DependencyRange, DependencyTemplate, DependencyTemplateType,
+  DependencyType, ExportsInfoArtifact, FactorizeInfo, ImportAttributes, ImportPhase,
+  ModuleDependency, ModuleGraphCacheArtifact, ReferencedSpecifier, ResourceIdentifier,
   TemplateContext, TemplateReplaceSource, create_exports_object_referenced,
+  create_referenced_exports_by_referenced_specifiers,
 };
 use swc_core::ecma::atoms::Atom;
 
 use super::create_resource_identifier_for_esm_dependency;
-
-pub fn create_import_dependency_referenced_exports(
-  dependency_id: &DependencyId,
-  referenced_exports: &Option<Vec<Vec<Atom>>>,
-  mg: &ModuleGraph,
-  mg_cache: &ModuleGraphCacheArtifact,
-  exports_info_artifact: &ExportsInfoArtifact,
-) -> Vec<ExtendedReferencedExport> {
-  if let Some(referenced_exports) = referenced_exports {
-    let mut refs = vec![];
-    for referenced_export in referenced_exports {
-      if let Some(first) = referenced_export.first()
-        && first == "default"
-      {
-        let Some(strict) = mg
-          .get_parent_module(dependency_id)
-          .and_then(|id| mg.module_by_identifier(id))
-          .map(|m| m.build_meta().strict_esm_module)
-        else {
-          return create_exports_object_referenced();
-        };
-        let Some(imported_module) = mg
-          .module_identifier_by_dependency_id(dependency_id)
-          .and_then(|id| mg.module_by_identifier(id))
-        else {
-          return create_exports_object_referenced();
-        };
-        let exports_type =
-          imported_module.get_exports_type(mg, mg_cache, exports_info_artifact, strict);
-        if matches!(
-          exports_type,
-          ExportsType::DefaultOnly | ExportsType::DefaultWithNamed
-        ) {
-          return create_exports_object_referenced();
-        }
-      }
-      refs.push(ExtendedReferencedExport::Export(ReferencedExport::new(
-        referenced_export.clone(),
-        false,
-        false,
-      )));
-    }
-    refs
-  } else {
-    create_exports_object_referenced()
-  }
-}
+use crate::dependency::{
+  DependencyBranchGuard, DependencyBranchGuards, compose_dependency_condition,
+};
 
 #[cacheable]
 #[derive(Debug, Clone)]
@@ -67,21 +24,23 @@ pub struct ImportDependency {
   #[cacheable(with=AsPreset)]
   request: Atom,
   pub range: DependencyRange,
-  #[cacheable(with=AsOption<AsVec<AsVec<AsPreset>>>)]
-  referenced_exports: Option<Vec<Vec<Atom>>>,
+  #[cacheable(with=AsOption<AsVec<AsCacheable>>)]
+  referenced_specifiers: Option<Vec<ReferencedSpecifier>>,
   attributes: Option<ImportAttributes>,
   phase: ImportPhase,
   pub comments: Vec<(bool, String)>,
   resource_identifier: ResourceIdentifier,
   factorize_info: FactorizeInfo,
   optional: bool,
+  #[cacheable(with=AsOption<AsCacheable>)]
+  branch_guards: Option<Box<DependencyBranchGuards>>,
 }
 
 impl ImportDependency {
   pub fn new(
     request: Atom,
     range: DependencyRange,
-    referenced_exports: Option<Vec<Vec<Atom>>>,
+    referenced_specifiers: Option<Vec<ReferencedSpecifier>>,
     attributes: Option<ImportAttributes>,
     phase: ImportPhase,
     optional: bool,
@@ -93,18 +52,23 @@ impl ImportDependency {
       request,
       range,
       id: DependencyId::new(),
-      referenced_exports,
+      referenced_specifiers,
       attributes,
       phase,
       resource_identifier,
       factorize_info: Default::default(),
       optional,
       comments,
+      branch_guards: None,
     }
   }
 
-  pub fn set_referenced_exports(&mut self, referenced_exports: Vec<Vec<Atom>>) {
-    self.referenced_exports = Some(referenced_exports);
+  pub fn set_referenced_specifiers(&mut self, referenced_specifiers: Vec<ReferencedSpecifier>) {
+    self.referenced_specifiers = Some(referenced_specifiers);
+  }
+
+  pub fn add_branch_guards(&mut self, guards: impl IntoIterator<Item = DependencyBranchGuard>) {
+    self.branch_guards.get_or_insert_default().extend(guards);
   }
 }
 
@@ -145,13 +109,31 @@ impl Dependency for ImportDependency {
     exports_info_artifact: &ExportsInfoArtifact,
     _runtime: Option<&rspack_core::RuntimeSpec>,
   ) -> Vec<rspack_core::ExtendedReferencedExport> {
-    create_import_dependency_referenced_exports(
-      &self.id,
-      &self.referenced_exports,
-      module_graph,
-      module_graph_cache,
-      exports_info_artifact,
-    )
+    if let Some(referenced_specifiers) = &self.referenced_specifiers {
+      let module = module_graph
+        .get_module_by_dependency_id(&self.id)
+        .expect("should have module");
+      let parent_module = module_graph
+        .get_parent_module(&self.id)
+        .expect("should have parent module");
+      let strict = module_graph
+        .module_by_identifier(parent_module)
+        .expect("should have parent module")
+        .get_strict_esm_module();
+      let exports_type = module.get_exports_type(
+        module_graph,
+        module_graph_cache,
+        exports_info_artifact,
+        strict,
+      );
+      create_referenced_exports_by_referenced_specifiers(
+        referenced_specifiers,
+        exports_type,
+        module.build_info().json_data.is_some(),
+      )
+    } else {
+      create_exports_object_referenced()
+    }
   }
 
   fn could_affect_referencing_module(&self) -> rspack_core::AffectType {
@@ -179,6 +161,10 @@ impl ModuleDependency for ImportDependency {
 
   fn get_optional(&self) -> bool {
     self.optional
+  }
+
+  fn get_condition(&self) -> Option<DependencyCondition> {
+    compose_dependency_condition(None, self.branch_guards.as_deref())
   }
 }
 

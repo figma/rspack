@@ -105,13 +105,16 @@ impl AggregatedDependency {
         // the context of circular detection.
         DependencyType::DynamicImport
           | DependencyType::DynamicImportEager
+          | DependencyType::DynamicImportWeak
           | DependencyType::LazyImport
           | DependencyType::ImportMetaHotAccept
           | DependencyType::ImportMetaHotDecline
           | DependencyType::ImportMetaResolve
+          | DependencyType::ImportMetaResolveContext
           | DependencyType::ModuleHotAccept
           | DependencyType::ModuleHotDecline
           | DependencyType::RequireResolve
+          | DependencyType::RequireResolveContext
       )
     })
   }

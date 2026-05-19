@@ -1,20 +1,26 @@
 //!  There are methods whose verb is `ChunkGraphChunk`
 
-use std::{borrow::Borrow, collections::VecDeque, fmt, sync::Arc};
+use std::{
+  collections::VecDeque,
+  fmt,
+  hash::{BuildHasherDefault, Hash},
+};
 
 use hashlink::LinkedHashMap;
-use indexmap::IndexSet;
+use indexmap::IndexMap;
 use itertools::Itertools;
-use rspack_cacheable::cacheable;
-use rspack_collections::{DatabaseItem, IdentifierLinkedMap, IdentifierMap, IdentifierSet};
+use rspack_cacheable::{cacheable, with::AsPreset};
+use rspack_collections::{IdentifierHasher, IdentifierLinkedMap, IdentifierMap, IdentifierSet};
 use rspack_util::fx_hash::FxIndexSet;
-use rustc_hash::{FxHashMap as HashMap, FxHashSet};
+use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Serialize, Serializer};
+use ustr::Ustr;
 
 use crate::{
   BoxModule, Chunk, ChunkByUkey, ChunkGraph, ChunkGraphModule, ChunkGroupByUkey, ChunkGroupUkey,
   ChunkUkey, Compilation, ExportsInfoArtifact, Module, ModuleGraph, ModuleGraphCacheArtifact,
-  ModuleIdentifier, RuntimeGlobals, RuntimeModule, SourceType, find_graph_roots, merge_runtime,
+  ModuleIdentifier, RuntimeGlobals, RuntimeModule, SideEffectsStateArtifact, SourceType,
+  find_graph_roots, merge_runtime,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -25,27 +31,30 @@ pub struct ChunkSizeOptions {
   pub entry_chunk_multiplicator: Option<f64>,
 }
 
+pub type ChunkIdMap<V> =
+  std::collections::HashMap<ChunkId, V, BuildHasherDefault<IdentifierHasher>>;
+pub type IndexChunkIdMap<V> = IndexMap<ChunkId, V, BuildHasherDefault<IdentifierHasher>>;
+pub type ChunkIdSet = std::collections::HashSet<ChunkId, BuildHasherDefault<IdentifierHasher>>;
+
 #[cacheable]
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct ChunkId {
-  inner: Arc<str>,
-}
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ChunkId(#[cacheable(with=AsPreset)] Ustr);
 
 impl From<String> for ChunkId {
   fn from(s: String) -> Self {
-    Self { inner: s.into() }
+    Self(s.into())
   }
 }
 
 impl From<&str> for ChunkId {
   fn from(s: &str) -> Self {
-    Self { inner: s.into() }
+    Self(s.into())
   }
 }
 
 impl fmt::Display for ChunkId {
   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-    write!(f, "{}", self.as_str())
+    write!(f, "{}", self.0)
   }
 }
 
@@ -54,19 +63,21 @@ impl Serialize for ChunkId {
   where
     S: Serializer,
   {
-    serializer.serialize_str(self.as_str())
-  }
-}
-
-impl Borrow<str> for ChunkId {
-  fn borrow(&self) -> &str {
-    self.as_str()
+    if let Some(n) = self.as_number() {
+      serializer.serialize_u32(n)
+    } else {
+      serializer.serialize_str(self.0.as_str())
+    }
   }
 }
 
 impl ChunkId {
+  pub fn as_number(&self) -> Option<u32> {
+    rspack_util::numeric_id_value(self.0.as_str())
+  }
+
   pub fn as_str(&self) -> &str {
-    &self.inner
+    self.0.as_str()
   }
 }
 
@@ -531,8 +542,8 @@ impl ChunkGraph {
     &self,
     chunk: &ChunkUkey,
     compilation: &Compilation,
-  ) -> HashMap<SourceType, f64> {
-    let mut sizes = HashMap::<SourceType, f64>::default();
+  ) -> FxHashMap<SourceType, f64> {
+    let mut sizes = FxHashMap::<SourceType, f64>::default();
     let cgc = self.expect_chunk_graph_chunk(chunk);
     let module_graph = &compilation.get_module_graph();
     for identifier in &cgc.modules {
@@ -693,8 +704,8 @@ impl ChunkGraph {
     chunk_ukey: &ChunkUkey,
     compilation: &Compilation,
     filter: F,
-  ) -> HashMap<String, bool> {
-    let mut map = HashMap::default();
+  ) -> FxHashMap<String, bool> {
+    let mut map = FxHashMap::default();
 
     let chunk = compilation
       .build_chunk_graph_artifact
@@ -719,6 +730,7 @@ impl ChunkGraph {
     chunk: &ChunkUkey,
     module_graph: &ModuleGraph,
     module_graph_cache: &ModuleGraphCacheArtifact,
+    side_effects_state_artifact: &SideEffectsStateArtifact,
     exports_info_artifact: &ExportsInfoArtifact,
   ) -> Vec<ModuleIdentifier> {
     let cgc = self.expect_chunk_graph_chunk(chunk);
@@ -732,6 +744,7 @@ impl ChunkGraph {
         set: &mut IdentifierSet,
         module_graph: &ModuleGraph,
         module_graph_cache: &ModuleGraphCacheArtifact,
+        side_effects_state_artifact: &SideEffectsStateArtifact,
         exports_info_artifact: &ExportsInfoArtifact,
       ) {
         for connection in module_graph.get_outgoing_connections(&module) {
@@ -740,6 +753,7 @@ impl ChunkGraph {
             module_graph,
             None,
             module_graph_cache,
+            side_effects_state_artifact,
             exports_info_artifact,
           );
           match active_state {
@@ -752,6 +766,7 @@ impl ChunkGraph {
                 set,
                 module_graph,
                 module_graph_cache,
+                side_effects_state_artifact,
                 exports_info_artifact,
               );
               continue;
@@ -767,6 +782,7 @@ impl ChunkGraph {
         &mut set,
         module_graph,
         module_graph_cache,
+        side_effects_state_artifact,
         exports_info_artifact,
       );
       set.into_iter().collect()
@@ -814,8 +830,8 @@ impl ChunkGraph {
     chunk_by_ukey: &ChunkByUkey,
     chunk_group_by_ukey: &ChunkGroupByUkey,
   ) -> impl Iterator<Item = ChunkUkey> {
-    let mut set = IndexSet::new();
-    let mut entrypoints = IndexSet::new();
+    let mut set = FxIndexSet::default();
+    let mut entrypoints = FxIndexSet::default();
 
     let chunk = chunk_by_ukey.expect_get(chunk_ukey);
 
@@ -876,7 +892,7 @@ impl ChunkGraph {
     chunk_group_by_ukey: &ChunkGroupByUkey,
   ) -> impl Iterator<Item = ChunkUkey> {
     let chunk = chunk_by_ukey.expect_get(chunk_ukey);
-    let mut set = IndexSet::new();
+    let mut set = FxIndexSet::default();
     for chunk_group_ukey in chunk.get_sorted_groups_iter(chunk_group_by_ukey) {
       let chunk_group = chunk_group_by_ukey.expect_get(chunk_group_ukey);
       if chunk_group.kind.is_entrypoint() {
@@ -1161,5 +1177,35 @@ impl ChunkGraph {
         None
       })
       .unwrap_or_else(|| module.source_types(module_graph).iter().copied().collect())
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::ChunkId;
+
+  #[test]
+  fn chunk_id_serialize_matches_runtime_numeric_rules() {
+    assert_eq!(serde_json::to_string(&ChunkId::from("903")).unwrap(), "903");
+    assert_eq!(
+      serde_json::to_string(&ChunkId::from("01")).unwrap(),
+      "\"01\""
+    );
+    assert_eq!(
+      serde_json::to_string(&ChunkId::from("main")).unwrap(),
+      "\"main\""
+    );
+    assert_eq!(
+      serde_json::to_string(&ChunkId::from("4294967295")).unwrap(),
+      "4294967295"
+    );
+    assert_eq!(
+      serde_json::to_string(&ChunkId::from("4294967296")).unwrap(),
+      "\"4294967296\""
+    );
+    assert_eq!(
+      serde_json::to_string(&vec![ChunkId::from("01"), ChunkId::from("903")]).unwrap(),
+      "[\"01\",903]"
+    );
   }
 }

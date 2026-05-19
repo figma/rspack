@@ -8,21 +8,23 @@ use std::{
 
 use cow_utils::CowUtils;
 use heck::{ToKebabCase, ToLowerCamelCase};
-use indexmap::{IndexMap, IndexSet};
 use regex::{Captures, Regex};
 use rspack_core::{
-  ChunkGraph, Compilation, CompilerOptions, CssExportsConvention, GenerateContext, LocalIdentName,
-  ModuleArgument, ModuleCodeTemplate, PathData, RESERVED_IDENTIFIER, ResourceData, RuntimeGlobals,
-  RuntimeSpec, UsedNameItem,
+  ChunkGraph, Compilation, CompilerOptions, CssExport, CssExportsConvention, GenerateContext,
+  LocalIdentName, ModuleArgument, ModuleCodeTemplate, PathData, RESERVED_IDENTIFIER, ResourceData,
+  RuntimeGlobals, RuntimeSpec, UsedNameItem,
   rspack_sources::{ConcatSource, RawStringSource},
   to_identifier,
 };
 use rspack_error::{Diagnostic, Error, Result, Severity, ToStringResultToRspackResultExt};
 use rspack_hash::RspackHash;
-use rspack_util::{atom::Atom, identifier::make_paths_relative, itoa, json_stringify_str};
+use rspack_util::{
+  atom::Atom,
+  fx_hash::{FxIndexMap, FxIndexSet},
+  identifier::make_paths_relative,
+  itoa, json_stringify_str,
+};
 use rustc_hash::FxHashSet as HashSet;
-
-use crate::parser_and_generator::CssExport;
 
 pub const AUTO_PUBLIC_PATH_PLACEHOLDER: &str = "__RSPACK_PLUGIN_CSS_AUTO_PUBLIC_PATH__";
 pub static LEADING_DIGIT_REGEX: LazyLock<Regex> =
@@ -146,7 +148,7 @@ pub(crate) fn export_locals_convention(
 
 #[allow(clippy::too_many_arguments)]
 pub fn css_modules_exports_to_string<'a>(
-  exports: IndexMap<&'a str, &'a IndexSet<CssExport>>,
+  exports: FxIndexMap<&'a str, &'a FxIndexSet<CssExport>>,
   module: &dyn rspack_core::Module,
   compilation: &Compilation,
   runtime: Option<&RuntimeSpec>,
@@ -183,7 +185,7 @@ if ({module_argument}.hot.data && {module_argument}.hot.data.exports && {module_
 }
 
 pub fn stringified_exports<'a>(
-  exports: IndexMap<&'a str, &'a IndexSet<CssExport>>,
+  exports: FxIndexMap<&'a str, &'a FxIndexSet<CssExport>>,
   compilation: &Compilation,
   runtime_template: &mut ModuleCodeTemplate,
   module: &dyn rspack_core::Module,
@@ -193,10 +195,7 @@ pub fn stringified_exports<'a>(
   let module_graph = compilation.get_module_graph();
   let exports_info = compilation
     .exports_info_artifact
-    .get_prefetched_exports_info(
-      &module.identifier(),
-      rspack_core::PrefetchExportsInfoMode::Default,
-    );
+    .get_exports_info_data(&module.identifier());
   for (key, elements) in exports {
     let export_info = exports_info.get_read_only_export_info(&Atom::from(key));
     let used_name = export_info.get_used_name(None, runtime);
@@ -237,10 +236,7 @@ pub fn stringified_exports<'a>(
 
             let from_exports_info = compilation
               .exports_info_artifact
-              .get_prefetched_exports_info(
-                &from.module_identifier,
-                rspack_core::PrefetchExportsInfoMode::Default,
-              );
+              .get_exports_info_data(&from.module_identifier);
             let from_used_name = match from_exports_info
               .get_read_only_export_info(&Atom::from(ident.as_str()))
               .get_used_name(None, runtime)
@@ -280,7 +276,7 @@ pub fn stringified_exports<'a>(
 }
 
 pub fn css_modules_exports_to_concatenate_module_string<'a>(
-  exports: IndexMap<&'a str, &'a IndexSet<CssExport>>,
+  exports: FxIndexMap<&'a str, &'a FxIndexSet<CssExport>>,
   module: &dyn rspack_core::Module,
   generate_context: &mut GenerateContext,
   concate_source: &mut ConcatSource,
@@ -299,10 +295,7 @@ pub fn css_modules_exports_to_concatenate_module_string<'a>(
   let mut used_identifiers = HashSet::default();
   let exports_info = compilation
     .exports_info_artifact
-    .get_prefetched_exports_info(
-      &module.identifier(),
-      rspack_core::PrefetchExportsInfoMode::Default,
-    );
+    .get_exports_info_data(&module.identifier());
   for (key, elements) in exports {
     let export_info = exports_info.get_read_only_export_info(&Atom::from(key));
     let used_name = export_info.get_used_name(None, *runtime);
@@ -343,10 +336,7 @@ pub fn css_modules_exports_to_concatenate_module_string<'a>(
 
             let from_exports_info = compilation
               .exports_info_artifact
-              .get_prefetched_exports_info(
-                &from.module_identifier,
-                rspack_core::PrefetchExportsInfoMode::Default,
-              );
+              .get_exports_info_data(&from.module_identifier);
             let from_used_name = match from_exports_info
               .get_read_only_export_info(&Atom::from(ident.as_str()))
               .get_used_name(None, *runtime)

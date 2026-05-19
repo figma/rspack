@@ -7,7 +7,6 @@ use std::{
 };
 
 use atomic_refcell::AtomicRefCell;
-use rspack_collections::{DatabaseItem, ItemUkey};
 use rspack_core::{
   AssetInfo, Chunk, ChunkGraph, ChunkKind, ChunkLoading, ChunkLoadingType, ChunkUkey, Compilation,
   CompilationContentHash, CompilationId, CompilationParams, CompilationRenderManifest,
@@ -176,7 +175,7 @@ impl CssPlugin {
       })
       .collect::<Result<Vec<_>>>()?;
 
-    let module_sources = rspack_futures::scope::<_, Result<_>>(|token| {
+    let module_sources = rspack_parallel::scope::<_, Result<_>>(|token| {
       module_sources
         .into_iter()
         .flatten()
@@ -234,7 +233,7 @@ impl CssPlugin {
                 }
               };
 
-              let chunk_ukey = chunk.ukey().as_u32().into();
+              let chunk_ukey = chunk.as_u32().into();
               hooks
                 .render_module_package
                 .call(
@@ -527,8 +526,6 @@ impl Plugin for CssPlugin {
           .and_then(|g| g.get_css())
           .expect("should have CssGeneratorOptions");
         Box::new(CssParserAndGenerator {
-          exports: None,
-          local_names: None,
           convention: None,
           local_ident_name: None,
           exports_only: g.exports_only.expect("should have exports_only"),
@@ -550,8 +547,6 @@ impl Plugin for CssPlugin {
           .and_then(|g| g.get_css_module())
           .expect("should have CssModuleGeneratorOptions");
         Box::new(CssParserAndGenerator {
-          exports: None,
-          local_names: None,
           convention: Some(
             g.exports_convention
               .expect("should have exports_convention"),
@@ -580,8 +575,6 @@ impl Plugin for CssPlugin {
           .and_then(|g| g.get_css_auto())
           .expect("should have CssAutoGeneratorOptions");
         Box::new(CssParserAndGenerator {
-          exports: None,
-          local_names: None,
           convention: Some(
             g.exports_convention
               .expect("should have exports_convention"),

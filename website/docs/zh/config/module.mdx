@@ -1,3 +1,7 @@
+---
+description: 'defaultRules 用于配置 Rspack 在内部默认启用的模块解析与处理规则。这些规则是自动生效的，用于确保常见资源类型（如 JavaScript、JSON、CSS、Wasm 等）能够被正常解析和打包。'
+---
+
 import { ApiMeta, Stability } from '../../../components/ApiMeta';
 import PropertyType from '@components/PropertyType';
 import WebpackLicense from '@components/WebpackLicense';
@@ -1212,18 +1216,14 @@ export default {
 
 <ApiMeta addedVersion="1.0.0-alpha.6" />
 
-<PropertyType
-  type="boolean | 'preserve-unknown'"
-  defaultValueList={[{ defaultValue: 'true' }]}
-/>
+- **类型：** `boolean | 'preserve-unknown'`
+- **默认值：** 当输出为 [ESM 格式](/guide/features/esm) 时，默认值为 `'preserve-unknown'`，其他情况默认值为 `true`
 
-是否要解析替换 `import.meta`。
+用于控制是否要解析和替换源代码中的 `import.meta`，可选值有：
 
-当输出为[ESM 格式](/guide/features/esm)时，默认值为`'preserve-unknown'`，其他情况默认值为`true`。
-
-- `"preserve-unknown"`: [已知的`import.meta`字段](/api/runtime-api/module-variables#importmeta-esm)会在编译期被替换，其他字段会被保留并在运行时被计算。
-- `true`: 所有`import.meta`字段在编译期被替换。
-- `false`: 所有`import.meta`字段都在运行时被计算。
+- `"preserve-unknown"`: [已知的 `import.meta` 字段](/api/runtime-api/module-variables#import-meta) 会在编译期被替换，其他字段会被保留并在运行时被计算。
+- `true`: 所有 `import.meta` 字段在编译期被替换。
+- `false`: 所有 `import.meta` 字段都在运行时被计算。
 
 ```js title="rspack.config.mjs"
 export default {
@@ -1353,16 +1353,12 @@ export default {
     },
     rules: [
       {
-        test: /\.ts$/,
+        test: /\.(?:js|mjs|ts)$/,
         use: [
           {
             loader: 'builtin:swc-loader',
             options: {
-              jsc: {
-                parser: {
-                  syntax: 'typescript',
-                },
-              },
+              detectSyntax: 'auto',
               collectTypeScriptInfo: {
                 typeExports: true, // "tolerant" 模式下需开启 typeExports 收集
               },
@@ -1553,6 +1549,67 @@ export default {
 };
 ```
 
+### module.parser.javascript.strictThisContextOnImports
+
+<PropertyType type="boolean" defaultValueList={[{ defaultValue: 'false' }]} />
+
+控制导入模块以对象调用方法的方式调用导出的函数时，Rspack 是否严格保留 `this` 绑定。
+
+```js title="rspack.config.mjs"
+export default {
+  module: {
+    parser: {
+      javascript: {
+        strictThisContextOnImports: false,
+      },
+    },
+  },
+};
+```
+
+这主要影响模块导出的函数中使用 `this` 来表示当前模块的场景，例如：
+
+```js title="index.js"
+import * as mod from './mod';
+
+console.log(mod.fn());
+```
+
+```js title="mod.js"
+export function fn() {
+  return this.value;
+}
+
+export const value = 42;
+```
+
+上面的例子中，开启后会输出 `42`；关闭时为了获得更好的 tree shaking 优化，`value` 被视为未使用而被移除，结果变成 `undefined`。
+
+- 设置为 `true` 时，Rspack 会更严格地遵循规范，优先保证运行时 `this` 语义正确，但会导致 tree shaking 优化效果下降。
+- 设置为 `false` 时，Rspack 会生成更好的优化结果，但可能会导致运行时 `this` 语义不正确。
+
+由于该用法在实际开发 ES 模块中非常少见，且开启会影响 tree shaking 优化效果，因此默认值为 `false`。
+
+:::tip
+如在实际开发时遇到该场景，建议优先避免使用该用法，如无法避免则建议使用 [module rule condition](/config/module-rules#condition) 为指定模块单独配置。
+
+```js title="rspack.config.mjs"
+export default {
+  module: {
+    rules: [
+      {
+        test: /index\.js$/, // 仅为 index.js 模块中的导入语句启用 strictThisContextOnImports
+        parser: {
+          strictThisContextOnImports: true,
+        },
+      },
+    ],
+  },
+};
+```
+
+:::
+
 ### module.parser.javascript.jsx
 
 <ApiMeta stability={Stability.Experimental} addedVersion="1.5.7" />
@@ -1577,6 +1634,75 @@ export default {
 
 :::warning
 该选项目前仅在 Rspack 中实验性提供，未来可能调整或移除。
+:::
+
+### module.parser.javascript.importMetaResolve
+
+<ApiMeta stability={Stability.Experimental} addedVersion="2.0.0" />
+
+<PropertyType type="boolean" defaultValueList={[{ defaultValue: 'false' }]} />
+
+让 JavaScript 解析器能够解析 `import.meta.resolve()` 语法。
+
+目前 `import.meta.resolve("./module")` 打包后的行为和 [`require.resolve("./module")`](/api/runtime-api/module-methods#requireresolve) 类似，会将模块打包进最终的 bundle 中，并且返回该模块的模块 ID。
+
+```js title="rspack.config.mjs"
+export default {
+  module: {
+    parser: {
+      javascript: {
+        importMetaResolve: true,
+      },
+    },
+  },
+};
+```
+
+:::warning
+该选项目前仅在 Rspack 中实验性提供，未来可能调整或移除。
+:::
+
+### module.parser.javascript.pureFunctions
+
+<ApiMeta stability={Stability.Experimental} />
+
+<PropertyType type="string[]" />
+
+手动将命中模块中的顶层标识符标记为“调用无副作用”，供基于 pure function 的 tree shaking 使用。配置的名字必须能解析到该模块中的某个顶层名 —— 包括顶层的 function/class/变量声明、`import` 引入的标识符、`export { foo as bar }` 这类导出别名，以及匹配源模块默认导出（fn 或 arrow）时使用的 `default`。
+
+这个选项主要面向无法直接修改源码的第三方库。你既可以将其配置在第三方库源文件上，也可以配置在消费侧文件上以断言对某个 import 的调用是 pure 的。
+
+虽然这个选项定义在 `module.parser.javascript` 下，但在实际使用时通常更推荐通过 `module.rules[i].parser` 应用它，这样可以更细粒度地为特定模块配置 `pureFunctions`。
+
+```js title="rspack.config.mjs"
+export default {
+  experiments: {
+    pureFunctions: true,
+  },
+  module: {
+    rules: [
+      // 将第三方库中的导出标记为 pure
+      {
+        test: /node_modules\/some-library\/index\.js$/,
+        parser: {
+          pureFunctions: ['isString'],
+        },
+      },
+      // 也可以在消费侧标记 import：该文件中对 `cva` 的调用都被视为 pure，
+      // 不依赖库本身的声明。
+      {
+        test: /src\/styles\.js$/,
+        parser: {
+          pureFunctions: ['cva'],
+        },
+      },
+    ],
+  },
+};
+```
+
+:::warning
+该选项只有在启用 `experiments.pureFunctions` 时才会生效；如果在命中的模块中找不到对应的顶层绑定，Rspack 会发出警告。
 :::
 
 ### module.parser["javascript/auto"]

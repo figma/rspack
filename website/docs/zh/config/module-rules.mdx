@@ -1,3 +1,7 @@
+---
+description: '它是一个规则数组。每条规则都会在模块被解析和创建时，与模块的信息进行匹配，例如文件路径、文件类型或查询参数。'
+---
+
 import { ApiMeta, Stability } from '../../../components/ApiMeta';
 import PropertyType from '@components/PropertyType';
 import WebpackLicense from '@components/WebpackLicense';
@@ -24,8 +28,8 @@ export default {
   module: {
     rules: [
       {
-        test: /\.ts$/,
-        use: 'builtin:swc-loader',
+        test: /\.(?:js|mjs|ts)$/,
+        loader: 'builtin:swc-loader',
         options: {
           // loader options...
         },
@@ -437,16 +441,14 @@ export default {
         type: 'asset/resource',
       },
       {
-        test: /\.ts$/,
+        test: /\.(?:js|mjs|ts)$/,
         exclude: [/node_modules/],
         loader: 'builtin:swc-loader',
         options: {
+          detectSyntax: 'auto',
           jsc: {
             experimental: {
 +             keepImportAttributes: true,
-            },
-            parser: {
-              syntax: 'typescript',
             },
           },
         },
@@ -468,7 +470,7 @@ export default {
   module: {
     rules: [
       {
-        test: /\.ts$/,
+        test: /\.(?:js|mjs|ts)$/,
         loader: 'builtin:swc-loader',
       },
     ],
@@ -490,11 +492,7 @@ export default {
         test: /\.ts$/,
         loader: 'builtin:swc-loader',
         options: {
-          jsc: {
-            parser: {
-              syntax: 'typescript',
-            },
-          },
+          detectSyntax: 'auto',
         },
       },
     ],

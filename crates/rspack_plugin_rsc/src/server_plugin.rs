@@ -1,3 +1,5 @@
+#![allow(clippy::ref_option_ref)]
+
 use std::sync::Arc;
 
 use atomic_refcell::AtomicRefCell;
@@ -5,37 +7,45 @@ use derive_more::Debug;
 use futures::future::BoxFuture;
 use rspack_collections::{Identifiable, IdentifierMap};
 use rspack_core::{
-  BoxDependency, ChunkUkey, Compilation, CompilationParams, CompilationProcessAssets,
-  CompilationRuntimeRequirementInTree, CompilerDone, CompilerFailed, CompilerFinishMake,
-  CompilerThisCompilation, Dependency, DependencyId, EntryDependency, EntryOptions, Logger, Plugin,
-  RuntimeGlobals, RuntimeModule, RuntimeSpec, get_entry_runtime,
+  BoxDependency, ChunkByUkey, ChunkNamedIdArtifact, ChunkUkey, Compilation, CompilationChunkIds,
+  CompilationParams, CompilationRuntimeRequirementInTree, CompilerCompilation, CompilerDone,
+  CompilerFailed, CompilerFinishMake, CompilerThisCompilation, Dependency, DependencyId,
+  DependencyType, EntryDependency, EntryOptions, Logger, Plugin, RuntimeGlobals, RuntimeModule,
+  RuntimeSpec, get_entry_runtime,
 };
-use rspack_error::Result;
+use rspack_error::{Diagnostic, Result, ToStringResultToRspackResultExt};
 use rspack_hook::{plugin, plugin_hook};
 use rustc_hash::{FxHashMap, FxHashSet};
-use serde_json::json;
 
 use crate::{
   component_info::{
-    ClientComponentImports, CssImports, collect_component_info_from_entry_denendency,
+    ClientComponentImports, ImportMetaRscImporters, collect_component_info_from_entry_dependency,
   },
-  constants::LAYERS_NAMES,
+  constants::{CSS_REGEX, LAYERS_NAMES},
   coordinator::Coordinator,
   hot_reloader::track_server_component_changes,
-  loaders::{
-    action_entry_loader::ACTION_ENTRY_LOADER_IDENTIFIER,
-    client_entry_loader::CLIENT_ENTRY_LOADER_IDENTIFIER,
-  },
+  loaders::action_entry_loader::ACTION_ENTRY_LOADER_IDENTIFIER,
   manifest_runtime_module::RscManifestRuntimeModule,
-  plugin_state::{ActionIdNamePair, ClientModuleImport, PLUGIN_STATES, PluginState},
+  plugin_state::{
+    ActionIdNamePair, ClientModuleImport, CssImportsByServerEntry, PLUGIN_STATES, PluginState,
+    RootCssImports,
+  },
+  reference_manifest::{
+    RscCssLinkProps, RscEntryManifest, RscManifest, build_server_consumer_module_map,
+    build_server_manifest,
+  },
+  rsc_entry_dependency::RscEntryDependency,
+  rsc_entry_module_factory::RscEntryModuleFactory,
 };
 
 #[derive(Debug)]
 struct ClientEntry {
-  entry_name: String,
+  entry_name: Arc<str>,
   runtime: RuntimeSpec,
   client_imports: ClientComponentImports,
-  css_imports: CssImports,
+  css_imports_by_server_entry: CssImportsByServerEntry,
+  root_css_imports: RootCssImports,
+  import_meta_rsc_importers: ImportMetaRscImporters,
 }
 
 #[derive(Debug)]
@@ -47,7 +57,7 @@ struct InjectedSsrEntry {
 
 struct ActionEntry {
   actions: FxHashMap<String, Vec<ActionIdNamePair>>,
-  entry_name: String,
+  entry_name: Arc<str>,
   runtime: RuntimeSpec,
   from_client: bool,
 }
@@ -60,9 +70,13 @@ struct InjectedActionEntry {
 
 type OnServerComponentChanges = Box<dyn Fn() -> BoxFuture<'static, Result<()>> + Sync + Send>;
 
+pub type OnManifest = Box<dyn Fn(String) -> BoxFuture<'static, Result<()>> + Sync + Send>;
+
 pub struct RscServerPluginOptions {
   pub coordinator: Arc<Coordinator>,
+  pub css_link_props: RscCssLinkProps,
   pub on_server_component_changes: Option<OnServerComponentChanges>,
+  pub on_manifest: Option<OnManifest>,
 }
 
 #[plugin]
@@ -72,6 +86,9 @@ pub struct RscServerPlugin {
   coordinator: Arc<Coordinator>,
   #[debug(skip)]
   on_server_component_changes: Option<OnServerComponentChanges>,
+  #[debug(skip)]
+  on_manifest: Option<OnManifest>,
+  css_link_props: RscCssLinkProps,
   prev_server_component_hashes: AtomicRefCell<IdentifierMap<u64>>,
 }
 
@@ -80,6 +97,8 @@ impl RscServerPlugin {
     Self::new_inner(
       options.coordinator,
       options.on_server_component_changes,
+      options.on_manifest,
+      options.css_link_props,
       Default::default(),
     )
   }
@@ -101,9 +120,23 @@ async fn this_compilation(
       vacant_entry.insert(Default::default());
     }
   };
+  PLUGIN_STATES
+    .entry(compilation.compiler_id())
+    .or_default()
+    .css_link_props = self.css_link_props.clone();
 
   self.coordinator.start_server_entries_compilation().await?;
 
+  Ok(())
+}
+
+#[plugin_hook(CompilerCompilation for RscServerPlugin)]
+async fn compilation(
+  &self,
+  compilation: &mut Compilation,
+  _params: &mut CompilationParams,
+) -> Result<()> {
+  compilation.set_dependency_factory(DependencyType::RscEntry, Arc::new(RscEntryModuleFactory));
   Ok(())
 }
 
@@ -116,8 +149,15 @@ async fn finish_make(&self, compilation: &mut Compilation) -> Result<()> {
 
     let start = logger.time("track server component changes");
     let mut prev_server_component_hashes = self.prev_server_component_hashes.borrow_mut();
-    plugin_state.changed_server_components_per_entry =
+    let changed_per_entry =
       track_server_component_changes(compilation, &mut prev_server_component_hashes);
+    for (entry_name, set) in changed_per_entry {
+      plugin_state
+        .entries
+        .entry(entry_name)
+        .or_default()
+        .changed_server_components = set;
+    }
     logger.time_end(start);
   }
 
@@ -147,9 +187,22 @@ async fn runtime_requirements_in_tree(
   Ok(None)
 }
 
-#[plugin_hook(CompilationProcessAssets for RscServerPlugin)]
-async fn process_assets(&self, _compilation: &mut Compilation) -> Result<()> {
-  self.coordinator.idle().await?;
+/// Compute server manifest and server_consumer_module_map once per entry. Stored in plugin_state for
+/// RscManifestRuntimeModule and onManifest to avoid recomputing.
+#[plugin_hook(CompilationChunkIds for RscServerPlugin, stage = -10000)]
+async fn chunk_ids(
+  &self,
+  compilation: &Compilation,
+  _chunk_by_ukey: &mut ChunkByUkey,
+  _named_chunk_ids_artifact: &mut ChunkNamedIdArtifact,
+  _diagnostics: &mut Vec<Diagnostic>,
+) -> Result<()> {
+  let mut plugin_state = PLUGIN_STATES.entry(compilation.compiler_id()).or_default();
+  build_server_manifest(compilation, &mut plugin_state)?;
+  for (_entry_name, entry_state) in plugin_state.entries.iter_mut() {
+    let map = build_server_consumer_module_map(compilation, &entry_state.client_modules);
+    entry_state.server_consumer_module_map = Some(map);
+  }
   Ok(())
 }
 
@@ -164,6 +217,7 @@ impl Plugin for RscServerPlugin {
       .this_compilation
       .tap(this_compilation::new(self));
 
+    ctx.compiler_hooks.compilation.tap(compilation::new(self));
     ctx.compiler_hooks.done.tap(done::new(self));
     ctx.compiler_hooks.failed.tap(failed::new(self));
 
@@ -174,10 +228,7 @@ impl Plugin for RscServerPlugin {
       .runtime_requirement_in_tree
       .tap(runtime_requirements_in_tree::new(self));
 
-    ctx
-      .compilation_hooks
-      .process_assets
-      .tap(process_assets::new(self));
+    ctx.compilation_hooks.chunk_ids.tap(chunk_ids::new(self));
 
     Ok(())
   }
@@ -186,35 +237,48 @@ impl Plugin for RscServerPlugin {
 impl RscServerPlugin {
   async fn create_client_entries(&self, compilation: &mut Compilation) -> Result<()> {
     let mut add_ssr_modules_list: Vec<InjectedSsrEntry> = Default::default();
-    let mut created_ssr_dependencies_per_entry: FxHashMap<String, Vec<DependencyId>> =
+    let mut created_ssr_dependencies_per_entry: FxHashMap<Arc<str>, Vec<DependencyId>> =
       Default::default();
     let mut add_action_entry_list: Vec<InjectedActionEntry> = Default::default();
-    let mut server_actions_per_entry: FxHashMap<String, FxHashMap<String, Vec<ActionIdNamePair>>> =
-      Default::default();
+    let mut server_actions_per_entry: FxHashMap<
+      Arc<str>,
+      FxHashMap<String, Vec<ActionIdNamePair>>,
+    > = Default::default();
     let mut created_action_ids: FxHashSet<String> = Default::default();
-    let mut runtime_per_entry: FxHashMap<String, RuntimeSpec> = Default::default();
+    let mut runtime_per_entry: FxHashMap<Arc<str>, RuntimeSpec> = Default::default();
 
     for (entry_name, entry_data) in &compilation.entries {
-      let runtime = get_entry_runtime(entry_name, &entry_data.options, &compilation.entries);
+      let entry_name: Arc<str> = Arc::from(entry_name.clone());
+      let runtime = get_entry_runtime(
+        entry_name.as_ref(),
+        &entry_data.options,
+        &compilation.entries,
+      );
       runtime_per_entry.insert(entry_name.clone(), runtime.clone());
 
       let mut action_entry_imports: FxHashMap<String, Vec<ActionIdNamePair>> = Default::default();
       let mut client_entries_to_inject = Vec::new();
 
-      let entry_dependency = &entry_data.dependencies[0];
+      let Some(entry_dependency) = entry_data.dependencies.first() else {
+        continue;
+      };
       let component_info =
-        collect_component_info_from_entry_denendency(compilation, &runtime, entry_dependency);
+        collect_component_info_from_entry_dependency(compilation, &runtime, entry_dependency);
       for (dep, actions) in component_info.action_imports {
         action_entry_imports.insert(dep, actions);
       }
       if !component_info.client_component_imports.is_empty()
-        || !component_info.css_imports.is_empty()
+        || !component_info.css_imports_by_server_entry.is_empty()
+        || !component_info.root_css_imports.is_empty()
+        || !component_info.import_meta_rsc_importers.is_empty()
       {
         client_entries_to_inject.push(ClientEntry {
           entry_name: entry_name.clone(),
           runtime: runtime.clone(),
           client_imports: component_info.client_component_imports,
-          css_imports: component_info.css_imports,
+          css_imports_by_server_entry: component_info.css_imports_by_server_entry,
+          root_css_imports: component_info.root_css_imports,
+          import_meta_rsc_importers: component_info.import_meta_rsc_importers,
         });
       }
 
@@ -223,15 +287,12 @@ impl RscServerPlugin {
 
         for client_entry_to_inject in client_entries_to_inject {
           let entry_name = client_entry_to_inject.entry_name.clone();
-          let Some(injected) = self
-            .inject_client_entry_and_ssr_modules(
-              compilation,
-              client_entry_to_inject,
-              component_info.should_inject_ssr_modules,
-              &mut plugin_state,
-            )
-            .await
-          else {
+          let Some(injected) = self.inject_client_entry_and_ssr_modules(
+            compilation,
+            client_entry_to_inject,
+            component_info.should_inject_ssr_modules,
+            &mut plugin_state,
+          ) else {
             continue;
           };
 
@@ -316,17 +377,25 @@ impl RscServerPlugin {
       .complete_server_actions_compilation()
       .await?;
 
-    let mut added_client_action_entry_list: Vec<InjectedActionEntry> = Vec::new();
-    let plugin_state = PLUGIN_STATES
-      .get(&compilation.compiler_id())
-      .ok_or_else(|| {
-        rspack_error::error!(
-          "RscServerPlugin: Plugin state not found in finish_make hook for compiler {:#?}.",
-          compilation.compiler_id()
-        )
-      })?;
+    let client_actions_per_entry = {
+      let plugin_state = PLUGIN_STATES
+        .get(&compilation.compiler_id())
+        .ok_or_else(|| {
+          rspack_error::error!(
+            "RscServerPlugin: Plugin state not found in finish_make hook for compiler {:#?}.",
+            compilation.compiler_id()
+          )
+        })?;
 
-    for (entry_name, action_entry_imports) in &plugin_state.client_actions_per_entry {
+      plugin_state
+        .entries
+        .iter()
+        .map(|(entry_name, entry_state)| (entry_name.clone(), entry_state.client_actions.clone()))
+        .collect::<Vec<_>>()
+    };
+
+    let mut added_client_action_entry_list: Vec<InjectedActionEntry> = Vec::new();
+    for (entry_name, action_entry_imports) in client_actions_per_entry {
       // If an action method is already created in the server layer, we don't
       // need to create it again in the action layer.
       // This is to avoid duplicate action instances and make sure the module
@@ -335,18 +404,18 @@ impl RscServerPlugin {
       let mut remaining_action_entry_imports: FxHashMap<String, Vec<ActionIdNamePair>> =
         Default::default();
       let runtime = runtime_per_entry
-        .get(entry_name)
+        .get(entry_name.as_ref())
         .cloned()
         .unwrap_or_default();
       for (dependency, actions) in action_entry_imports {
         let mut remaining_actions: Vec<ActionIdNamePair> = Vec::new();
         for action in actions {
-          if !created_action_ids.contains(&format!("{}@{}", entry_name, &action.0)) {
+          if !created_action_ids.contains(&format!("{}@{}", entry_name.as_ref(), &action.0)) {
             remaining_actions.push(action.clone());
           }
         }
         if !remaining_actions.is_empty() {
-          remaining_action_entry_imports.insert(dependency.clone(), remaining_actions);
+          remaining_action_entry_imports.insert(dependency, remaining_actions);
           remaining_client_imported_actions = true;
         }
       }
@@ -392,9 +461,9 @@ impl RscServerPlugin {
     Ok(())
   }
 
-  async fn inject_client_entry_and_ssr_modules(
+  fn inject_client_entry_and_ssr_modules(
     &self,
-    compilation: &Compilation,
+    _compilation: &Compilation,
     client_entry: ClientEntry,
     should_inject_ssr_modules: bool,
     plugin_state: &mut PluginState,
@@ -403,24 +472,31 @@ impl RscServerPlugin {
       entry_name,
       runtime,
       client_imports,
-      css_imports,
+      css_imports_by_server_entry,
+      root_css_imports,
+      import_meta_rsc_importers,
     } = client_entry;
 
     let client_entries = {
       let mut modules = Vec::new();
-      let merged_css_imports = css_imports.values().flatten().collect::<FxHashSet<_>>();
-      for request in merged_css_imports {
-        modules.push(ClientModuleImport {
-          request: request.clone(),
-          ids: vec![],
-        });
+      let entry_state = plugin_state.entries.entry(entry_name.clone()).or_default();
+      for (server_entry, css_imports) in css_imports_by_server_entry {
+        entry_state
+          .server_entries
+          .entry(server_entry)
+          .or_default()
+          .css_imports
+          .extend(css_imports);
       }
-
-      plugin_state
-        .entry_css_imports
-        .entry(entry_name.clone())
-        .or_default()
-        .extend(css_imports.into_iter());
+      for (server_entry, importers) in import_meta_rsc_importers {
+        entry_state
+          .server_entries
+          .entry(server_entry)
+          .or_default()
+          .import_meta_rsc_importers
+          .extend(importers);
+      }
+      entry_state.root_css_imports.extend(root_css_imports);
 
       for (request, ids) in &client_imports {
         modules.push(ClientModuleImport {
@@ -431,40 +507,32 @@ impl RscServerPlugin {
       modules
     };
 
-    let client_server_loader = {
-      let mut serializer = form_urlencoded::Serializer::new(String::new());
-      for (request, ids) in &client_imports {
-        #[allow(clippy::unwrap_used)]
-        let module_json = serde_json::to_string(&json!({
-            "request": request,
-            "ids": ids
-        }))
-        .unwrap();
-        serializer.append_pair("modules", &module_json);
-      }
-      serializer.append_pair("server", "true");
-      format!(
-        "{}?{}!",
-        CLIENT_ENTRY_LOADER_IDENTIFIER,
-        serializer.finish()
-      )
-    };
-
     // Add for the client compilation
     // Inject the entry to the client compiler.
     plugin_state
-      .injected_client_entries
-      .insert(entry_name.clone(), client_entries);
+      .entries
+      .entry(entry_name.clone())
+      .or_default()
+      .injected_client_entries = client_entries.clone();
 
     if !should_inject_ssr_modules {
       return None;
     }
 
-    let ssr_entry_dependency = EntryDependency::new(
-      client_server_loader,
-      compilation.options.context.clone(),
-      Some(LAYERS_NAMES.server_side_rendering.to_string()),
-      false,
+    // For SSR, filter out CSS (server does not need CSS in the eager entry).
+    let client_entries_for_ssr: Vec<ClientModuleImport> = client_entries
+      .iter()
+      .filter(|m| !CSS_REGEX.is_match(&m.request))
+      .map(|m| ClientModuleImport {
+        request: m.request.clone(),
+        ids: m.ids.clone(),
+      })
+      .collect();
+    let ssr_entry_dependency = RscEntryDependency::new(
+      entry_name.clone(),
+      client_entries_for_ssr,
+      Default::default(),
+      true,
     );
     let dependency_id = *(ssr_entry_dependency.id());
     Some(InjectedSsrEntry {
@@ -472,7 +540,8 @@ impl RscServerPlugin {
       add_entry: (
         Box::new(ssr_entry_dependency),
         EntryOptions {
-          name: Some(entry_name),
+          name: Some(entry_name.to_string()),
+          layer: Some(LAYERS_NAMES.server_side_rendering.to_string()),
           ..Default::default()
         },
       ),
@@ -527,7 +596,7 @@ impl RscServerPlugin {
       add_entry: (
         Box::new(action_entry_dep),
         EntryOptions {
-          name: Some(entry_name),
+          name: Some(entry_name.to_string()),
           layer: Some(layer),
           ..Default::default()
         },
@@ -538,24 +607,67 @@ impl RscServerPlugin {
 
 #[plugin_hook(CompilerDone for RscServerPlugin)]
 async fn done(&self, compilation: &Compilation) -> Result<()> {
-  if let Some(on_server_component_changes) = self.on_server_component_changes.as_ref() {
-    let plugin_state = PLUGIN_STATES
-      .get(&compilation.compiler_id())
-      .ok_or_else(|| {
+  if let Some(on_manifest) = self.on_manifest.as_ref() {
+    let json = {
+      let plugin_state = PLUGIN_STATES
+        .get(&compilation.compiler_id())
+        .ok_or_else(|| {
+          rspack_error::error!(
+            "RscServerPlugin: Plugin state not found in done hook for compiler {:#?}.",
+            compilation.compiler_id()
+          )
+        })?;
+      let module_loading = plugin_state.module_loading.as_ref().ok_or_else(|| {
         rspack_error::error!(
-          "RscServerPlugin: Plugin state not found in done hook for compiler {:#?}.",
-          compilation.compiler_id()
+          "Missing RSC moduleLoading config in plugin state. Ensure ClientPlugin is applied."
         )
       })?;
-    let changed_server_components_per_entry = plugin_state
-      .changed_server_components_per_entry
-      .iter()
-      .filter(|(_, changes)| !changes.is_empty())
-      .collect::<FxHashMap<_, _>>();
-    if !changed_server_components_per_entry.is_empty() {
+      let empty_consumer_map: FxHashMap<String, crate::reference_manifest::ManifestNode> =
+        FxHashMap::default();
+      let mut full_manifest: RscManifest<'_> = FxHashMap::default();
+      for (name, state) in &plugin_state.entries {
+        full_manifest.insert(
+          name.clone(),
+          RscEntryManifest {
+            server_manifest: &state.server_actions,
+            client_manifest: &state.client_modules,
+            server_consumer_module_map: state
+              .server_consumer_module_map
+              .as_ref()
+              .or(Some(&empty_consumer_map)),
+            module_loading,
+            server_entries: &state.server_entries,
+            bootstrap_scripts: &state.bootstrap_scripts,
+            css_link_props: &plugin_state.css_link_props,
+          },
+        );
+      }
+      simd_json::to_string(&full_manifest).to_rspack_result()?
+    };
+    (on_manifest)(json).await?;
+  }
+
+  if let Some(on_server_component_changes) = self.on_server_component_changes.as_ref() {
+    let has_changed_server_components = {
+      let plugin_state = PLUGIN_STATES
+        .get(&compilation.compiler_id())
+        .ok_or_else(|| {
+          rspack_error::error!(
+            "RscServerPlugin: Plugin state not found in done hook for compiler {:#?}.",
+            compilation.compiler_id()
+          )
+        })?;
+      plugin_state
+        .entries
+        .values()
+        .any(|e| !e.changed_server_components.is_empty())
+    };
+    if has_changed_server_components {
       (on_server_component_changes)().await?;
     }
   }
+
+  self.coordinator.idle().await?;
   Ok(())
 }
 

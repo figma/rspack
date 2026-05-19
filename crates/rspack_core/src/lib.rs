@@ -19,13 +19,14 @@ mod dependencies_block;
 pub mod diagnostics;
 pub mod incremental;
 pub use dependencies_block::{
-  AsyncDependenciesBlock, AsyncDependenciesBlockIdentifier, DependenciesBlock,
+  AsyncDependenciesBlock, AsyncDependenciesBlockIdentifier, AsyncDependenciesBlockIdentifierMap,
+  AsyncDependenciesBlockIdentifierSet, DependenciesBlock,
 };
 mod fake_namespace_object;
 pub use fake_namespace_object::*;
 mod runtime_template;
-use rspack_collections::Database;
 pub use runtime_template::*;
+use rustc_hash::FxHashMap;
 pub mod external_module;
 pub use external_module::*;
 mod logger;
@@ -98,7 +99,6 @@ pub use rspack_location::{
 };
 pub mod concatenated_module;
 pub mod reserved_names;
-
 use rspack_cacheable::{cacheable, with::AsPreset};
 pub use rspack_loader_runner::{
   AdditionalData, BUILTIN_LOADER_PREFIX, ParseMeta, ResourceData, ResourceParsedData, Scheme,
@@ -111,7 +111,7 @@ pub use rspack_sources;
 pub mod debug_info;
 
 #[cacheable]
-#[derive(Default, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Default, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum SourceType {
   JavaScript,
   Css,
@@ -321,7 +321,7 @@ pub(crate) type SharedPluginDriver = Arc<PluginDriver>;
 
 #[derive(Debug, Default, Clone)]
 pub struct ChunkByUkey {
-  inner: Database<Chunk>,
+  inner: FxHashMap<ChunkUkey, Chunk>,
 }
 
 impl ChunkByUkey {
@@ -337,7 +337,7 @@ impl ChunkByUkey {
     &mut self,
     ukeys: [&ChunkUkey; N],
   ) -> [Option<&mut Chunk>; N] {
-    self.inner.get_many_mut(ukeys)
+    self.inner.get_disjoint_mut(ukeys)
   }
 
   pub fn expect_get(&self, ukey: &ChunkUkey) -> &Chunk {
@@ -353,7 +353,9 @@ impl ChunkByUkey {
   }
 
   pub fn add(&mut self, chunk: Chunk) -> &mut Chunk {
-    self.inner.add(chunk)
+    let ukey = chunk.ukey();
+    debug_assert!(!self.inner.contains_key(&ukey));
+    self.inner.entry(ukey).or_insert(chunk)
   }
 
   pub fn remove(&mut self, ukey: &ChunkUkey) -> Option<Chunk> {
@@ -368,7 +370,7 @@ impl ChunkByUkey {
   }
 
   pub fn contains(&self, ukey: &ChunkUkey) -> bool {
-    self.inner.contains(ukey)
+    self.inner.contains_key(ukey)
   }
 
   pub fn keys(&self) -> impl Iterator<Item = &ChunkUkey> {
@@ -402,7 +404,7 @@ impl ChunkByUkey {
 
 #[derive(Debug, Default, Clone)]
 pub struct ChunkGroupByUkey {
-  inner: Database<ChunkGroup>,
+  inner: FxHashMap<ChunkGroupUkey, ChunkGroup>,
 }
 
 impl ChunkGroupByUkey {
@@ -418,7 +420,7 @@ impl ChunkGroupByUkey {
     &mut self,
     ukeys: [&ChunkGroupUkey; N],
   ) -> [Option<&mut ChunkGroup>; N] {
-    self.inner.get_many_mut(ukeys)
+    self.inner.get_disjoint_mut(ukeys)
   }
 
   pub fn expect_get(&self, ukey: &ChunkGroupUkey) -> &ChunkGroup {
@@ -434,7 +436,9 @@ impl ChunkGroupByUkey {
   }
 
   pub fn add(&mut self, chunk: ChunkGroup) -> &mut ChunkGroup {
-    self.inner.add(chunk)
+    let ukey = chunk.ukey();
+    debug_assert!(!self.inner.contains_key(&ukey));
+    self.inner.entry(ukey).or_insert(chunk)
   }
 
   pub fn remove(&mut self, ukey: &ChunkGroupUkey) -> Option<ChunkGroup> {
@@ -449,7 +453,7 @@ impl ChunkGroupByUkey {
   }
 
   pub fn contains(&self, ukey: &ChunkGroupUkey) -> bool {
-    self.inner.contains(ukey)
+    self.inner.contains_key(ukey)
   }
 
   pub fn keys(&self) -> impl Iterator<Item = &ChunkGroupUkey> {

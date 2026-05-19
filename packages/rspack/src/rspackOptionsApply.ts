@@ -33,13 +33,13 @@ import {
   EnableLibraryPlugin,
   EnableWasmLoadingPlugin,
   EnsureChunkConditionsPlugin,
-  EsmLibraryPlugin,
   EvalDevToolModulePlugin,
   EvalSourceMapDevToolPlugin,
   ExternalsPlugin,
   FileUriPlugin,
   FlagDependencyExportsPlugin,
   FlagDependencyUsagePlugin,
+  HashedModuleIdsPlugin,
   HttpExternalsRspackPlugin,
   HttpUriPlugin,
   InferAsyncModulesPlugin,
@@ -260,7 +260,7 @@ export class RspackOptionsApply {
     }
 
     if (options.optimization.sideEffects) {
-      new SideEffectsFlagPlugin(/* options.optimization.sideEffects === true */).apply(
+      new SideEffectsFlagPlugin(options.experiments.pureFunctions).apply(
         compiler,
       );
     }
@@ -289,37 +289,35 @@ export class RspackOptionsApply {
       options.output.enabledLibraryTypes &&
       options.output.enabledLibraryTypes.length > 0
     ) {
-      let modernModuleCount = 0;
-      for (const type of options.output.enabledLibraryTypes) {
-        if (type === 'modern-module') {
-          modernModuleCount++;
-        }
-      }
+      const hasModernModule =
+        options.output.enabledLibraryTypes.includes('modern-module');
+      const hasNonModernModule = options.output.enabledLibraryTypes.some(
+        (t) => t !== 'modern-module',
+      );
 
-      if (options.output.library?.preserveModules && modernModuleCount === 0) {
-        throw new Error(
-          'preserveModules only works for `modern-module` library type',
+      if (options.output.library?.preserveModules && !hasModernModule) {
+        const logger = compiler.getInfrastructureLogger(
+          'rspack.RspackOptionsApply',
+        );
+        logger.warn(
+          '`preserveModules` only works for `modern-module` library type and will be ignored for other library types.',
         );
       }
 
-      if (modernModuleCount > 0) {
-        // ESM format has impact on chunkLoading and chunkFormat, which is not compatible with
-        // other library types
-        if (modernModuleCount !== options.output.enabledLibraryTypes.length) {
-          throw new Error(
-            '`modern-module` cannot used together with other library types',
-          );
-        }
+      if (hasModernModule && hasNonModernModule) {
+        const logger = compiler.getInfrastructureLogger(
+          'rspack.RspackOptionsApply',
+        );
+        logger.warn(
+          '`modern-module` is used together with other library types. ESM format has impact on chunkLoading and chunkFormat, which may not be compatible with other library types.',
+        );
+      }
 
-        enableLibSplitChunks = true;
-        new EsmLibraryPlugin({
-          preserveModules: options.output.library?.preserveModules,
-          splitChunks: options.optimization.splitChunks,
-        }).apply(compiler);
-      } else {
-        for (const type of options.output.enabledLibraryTypes) {
-          new EnableLibraryPlugin(type).apply(compiler);
+      for (const type of options.output.enabledLibraryTypes) {
+        if (type === 'modern-module') {
+          enableLibSplitChunks = true;
         }
+        new EnableLibraryPlugin(type).apply(compiler);
       }
     }
 
@@ -346,6 +344,10 @@ export class RspackOptionsApply {
         }
         case 'deterministic': {
           new DeterministicModuleIdsPlugin().apply(compiler);
+          break;
+        }
+        case 'hashed': {
+          new HashedModuleIdsPlugin().apply(compiler);
           break;
         }
         default:

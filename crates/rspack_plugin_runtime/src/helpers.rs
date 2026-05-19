@@ -2,16 +2,36 @@ use std::{hash::Hash, sync::LazyLock};
 
 use itertools::Itertools;
 use regex::Regex;
-use rspack_collections::{IdentifierLinkedMap, UkeyIndexSet};
+use rspack_collections::IdentifierLinkedMap;
 use rspack_core::{
-  Chunk, ChunkGraph, ChunkGroupByUkey, ChunkGroupUkey, ChunkUkey, Compilation, PathData,
-  RuntimeCodeTemplate, RuntimeGlobals, RuntimeVariable, SourceType, get_js_chunk_filename_template,
+  Chunk, ChunkGraph, ChunkGroupByUkey, ChunkGroupUkey, ChunkLoading, ChunkLoadingType, ChunkUkey,
+  Compilation, PathData, RuntimeCodeTemplate, RuntimeGlobals, RuntimeVariable, SourceType,
+  chunk_graph_chunk::ChunkIdSet,
+  get_js_chunk_filename_template,
   rspack_sources::{BoxSource, RawStringSource, SourceExt},
 };
 use rspack_error::{Result, error};
 use rspack_hash::RspackHash;
 use rspack_plugin_javascript::runtime::stringify_chunks_to_array;
+use rspack_util::fx_hash::FxIndexSet;
 use rustc_hash::FxHashSet as HashSet;
+
+use crate::runtime_module::is_enabled_for_chunk;
+
+pub fn should_export_webpack_require_for_module_chunk_loading(
+  chunk_ukey: &ChunkUkey,
+  compilation: &Compilation,
+) -> bool {
+  let chunk_loading = ChunkLoading::Enable(ChunkLoadingType::Import);
+  is_enabled_for_chunk(chunk_ukey, &chunk_loading, compilation)
+    && compilation
+      .build_chunk_graph_artifact
+      .chunk_graph
+      .has_chunk_entry_dependent_chunks(
+        chunk_ukey,
+        &compilation.build_chunk_graph_artifact.chunk_group_by_ukey,
+      )
+}
 
 pub fn update_hash_for_entry_startup(
   hasher: &mut RspackHash,
@@ -59,14 +79,14 @@ pub fn get_all_chunks(
   exclude_chunk1: &ChunkUkey,
   exclude_chunk2: Option<&ChunkUkey>,
   chunk_group_by_ukey: &ChunkGroupByUkey,
-) -> UkeyIndexSet<ChunkUkey> {
+) -> FxIndexSet<ChunkUkey> {
   fn add_chunks(
     chunk_group_by_ukey: &ChunkGroupByUkey,
-    chunks: &mut UkeyIndexSet<ChunkUkey>,
+    chunks: &mut FxIndexSet<ChunkUkey>,
     entrypoint_ukey: &ChunkGroupUkey,
     exclude_chunk1: &ChunkUkey,
     exclude_chunk2: Option<&ChunkUkey>,
-    visit_chunk_groups: &mut UkeyIndexSet<ChunkGroupUkey>,
+    visit_chunk_groups: &mut FxIndexSet<ChunkGroupUkey>,
   ) {
     if let Some(entrypoint) = chunk_group_by_ukey.get(entrypoint_ukey) {
       for chunk in &entrypoint.chunks {
@@ -102,8 +122,8 @@ pub fn get_all_chunks(
     }
   }
 
-  let mut chunks = UkeyIndexSet::default();
-  let mut visit_chunk_groups = UkeyIndexSet::default();
+  let mut chunks = FxIndexSet::default();
+  let mut visit_chunk_groups = FxIndexSet::default();
 
   add_chunks(
     chunk_group_by_ukey,
@@ -207,7 +227,7 @@ pub fn generate_entry_startup(
   runtime_template: &RuntimeCodeTemplate<'_>,
 ) -> BoxSource {
   let mut module_id_exprs = vec![];
-  let mut chunks_ids = HashSet::default();
+  let mut chunks_ids = ChunkIdSet::default();
   let module_graph = compilation.get_module_graph();
   for (module, entry) in entries {
     if let Some(module_id) = module_graph

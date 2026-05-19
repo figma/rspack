@@ -12,7 +12,7 @@ import {
   rspack,
 } from '@rslib/core';
 import packageJson from './package.json' with { type: 'json' };
-import prebundleConfig from './prebundle.config.mjs';
+import prebundleConfig from './prebundle.config.js';
 
 const require = createRequire(import.meta.url);
 
@@ -121,7 +121,7 @@ const codmodPlugin: RsbuildPlugin = {
     /**
      * Replaces `@rspack/binding` to code that reads env `RSPACK_BINDING` as the custom binding.
      */
-    function replaceBinding(root: SgNode<TypesMap, Kinds<TypesMap>>): Edit[] {
+    function replaceBinding(root: SgNode<TypesMap, Kinds>): Edit[] {
       const edits: Edit[] = [];
 
       // Pattern 1: let binding_namespaceObject = __rspack_createRequire_require("@rspack/binding");
@@ -155,7 +155,7 @@ const codmodPlugin: RsbuildPlugin = {
       return edits;
     }
 
-    api.onAfterBuild(async () => {
+    api.onAfterBuild(() => {
       const dist = fs.readFileSync(
         require.resolve(path.resolve(import.meta.dirname, 'dist/index.js')),
         'utf-8',
@@ -171,7 +171,11 @@ const codmodPlugin: RsbuildPlugin = {
   },
 };
 
-// Remove `export { rspack as 'module.exports' };` to avoid parsing errors with TypeScript < 5.6.2
+/*
+ * Remove `export { rspack as 'module.exports' }` to:
+ * 1. avoid parse errors in TypeScript < 5.6.2.
+ * 2. prevent namespace imports from degrading under `moduleResolution: 'NodeNext'`, which can break `Rspack.*` type access.
+ */
 const removeDtsExportPlugin: RsbuildPlugin = {
   name: 'remove-dts-export',
   setup(api) {
@@ -180,8 +184,8 @@ const removeDtsExportPlugin: RsbuildPlugin = {
       if (fs.existsSync(dtsPath)) {
         const content = await fs.promises.readFile(dtsPath, 'utf-8');
         const newContent = content.replace(
-          "export { rspack as 'module.exports' };",
-          '',
+          "export { rspack, rspack as 'module.exports' };",
+          'export { rspack };',
         );
         await fs.promises.writeFile(dtsPath, newContent);
       }
@@ -195,9 +199,15 @@ export default defineConfig({
     merge(commonLibConfig, {
       dts: {
         build: true,
+        tsgo: true,
         alias: {
           // alias to pre-bundled types as they are public API
+          open: './compiled/open',
+          'connect-next': './compiled/connect-next',
           '@rspack/lite-tapable': './compiled/@rspack/lite-tapable/dist',
+          'http-proxy-middleware': './compiled/http-proxy-middleware',
+          // Note: the JS bundle resolves to ./compiled/webpack-sources/index.js, while DTS should point to the generated types directory.
+          'webpack-sources': './compiled/webpack-sources/types',
         },
       },
       redirect: {

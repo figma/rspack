@@ -9,6 +9,7 @@ mod target;
 pub use builder_context::BuilderContext;
 pub use devtool::Devtool;
 use rspack_tasks::CURRENT_COMPILER_CONTEXT;
+use rspack_util::fx_hash::FxIndexMap;
 pub use target::Targets;
 
 macro_rules! d {
@@ -31,7 +32,6 @@ macro_rules! expect {
 
 use std::{
   borrow::Cow,
-  future::ready,
   sync::{Arc, LazyLock},
 };
 
@@ -39,7 +39,6 @@ use builder_context::BuiltinPluginOptions;
 use derive_more::Debug;
 use devtool::DevtoolFlags;
 use externals::ExternalsPresets;
-use indexmap::IndexMap;
 use regex::Regex;
 use rspack_core::{
   AssetParserDataUrl, AssetParserDataUrlOptions, AssetParserOptions, BoxPlugin, ByDependency,
@@ -318,11 +317,11 @@ impl CompilerBuilder {
   ///
   /// // Using builder without calling `build()`
   /// let compiler = Compiler::builder()
-  ///   .optimization(OptimizationOptionsBuilder::default().remove_available_modules(true));
+  ///   .optimization(OptimizationOptionsBuilder::default().remove_empty_chunks(true));
   ///
   /// // `Optimization::builder` equals to `OptimizationOptionsBuilder::default()`
   /// let compiler =
-  ///   Compiler::builder().optimization(Optimization::builder().remove_available_modules(true));
+  ///   Compiler::builder().optimization(Optimization::builder().remove_empty_chunks(true));
   ///
   /// // Or directly passing `Optimization`
   /// // let compiler = Compiler::builder().optimization(Optimization { ... });
@@ -569,7 +568,7 @@ pub struct CompilerOptionsBuilder {
   /// The environment in which the code should run.
   target: Option<Targets>,
   /// The entry point of the application.
-  entry: IndexMap<String, EntryDescription>,
+  entry: FxIndexMap<String, EntryDescription>,
   /// External libraries that should not be bundled.
   externals: Option<Vec<ExternalItem>>,
   /// The type of externals.
@@ -791,7 +790,7 @@ impl CompilerOptionsBuilder {
     self
   }
 
-  /// Set options for optimization.  
+  /// Set options for optimization.
   ///
   /// Both are accepted:
   /// - [`OptimizationOptionsBuilder`]
@@ -805,11 +804,11 @@ impl CompilerOptionsBuilder {
   ///
   /// // Using builder without calling `build()`
   /// let compiler = Compiler::builder()
-  ///   .optimization(OptimizationOptionsBuilder::default().remove_available_modules(true));
+  ///   .optimization(OptimizationOptionsBuilder::default().remove_empty_chunks(true));
   ///
   /// // `Optimization::builder` equals to `OptimizationOptionsBuilder::default()`
   /// let compiler =
-  ///   Compiler::builder().optimization(Optimization::builder().remove_available_modules(true));
+  ///   Compiler::builder().optimization(Optimization::builder().remove_empty_chunks(true));
   ///
   /// // Or directly passing `Optimization`
   /// // let compiler = Compiler::builder().optimization(Optimization { ... });
@@ -1071,7 +1070,16 @@ impl CompilerOptionsBuilder {
 
     w!(self.externals_type, {
       if let Some(library) = &output.library {
-        library.library_type.clone()
+        // Keep modern-module libraries on the existing output.module default
+        // for compatibility. `externalsType: "modern-module"` must be enabled
+        // explicitly for now, and will become the default in the next major.
+        if library.library_type != "modern-module" {
+          library.library_type.clone()
+        } else if output.module {
+          "module-import".to_string()
+        } else {
+          "var".to_string()
+        }
       } else if output.module {
         "module-import".to_string()
       } else {
@@ -1082,10 +1090,11 @@ impl CompilerOptionsBuilder {
     // apply externals plugin
     if let Some(externals) = &mut self.externals {
       let externals = std::mem::take(externals);
+      let externals_type = expect!(self.externals_type.clone());
       builder_context
         .plugins
         .push(BuiltinPluginOptions::ExternalsPlugin((
-          expect!(self.externals_type.clone()),
+          externals_type,
           externals,
           false,
         )));
@@ -1162,12 +1171,12 @@ impl CompilerOptionsBuilder {
       builder_context,
       development,
       production,
-      css,
+      &experiments,
     )?;
 
     // apply resolve defaults
     let resolve = {
-      let resolve_defaults = get_resolve_defaults(&context, mode, &target_properties, css);
+      let resolve_defaults = get_resolve_defaults(mode, &target_properties, css);
       if let Some(resolve) = self.resolve.take() {
         resolve_defaults.merge(resolve)
       } else {
@@ -1281,12 +1290,7 @@ impl CompilerOptionsBuilder {
   }
 }
 
-fn get_resolve_defaults(
-  context: &Context,
-  mode: Mode,
-  target_properties: &TargetProperties,
-  css: bool,
-) -> Resolve {
+fn get_resolve_defaults(mode: Mode, target_properties: &TargetProperties, css: bool) -> Resolve {
   let mut conditions = vec!["webpack".to_string()];
 
   // Add mode condition
@@ -1312,7 +1316,7 @@ fn get_resolve_defaults(
     conditions.push("nwjs".to_string());
   }
 
-  let js_extensions = vec![".js".to_string(), ".json".to_string(), ".wasm".to_string()];
+  let js_extensions = vec![".js".to_string(), ".json".to_string()];
 
   let browser_field = target_properties.web()
     && (!target_properties.node()
@@ -1387,11 +1391,10 @@ fn get_resolve_defaults(
 
   // Add CSS dependencies if enabled
   if css {
-    let mut style_conditions = vec!["webpack".to_string()];
-    style_conditions.push(match mode {
+    let mut style_conditions = vec![match mode {
       Mode::Development => "development".to_string(),
       _ => "production".to_string(),
-    });
+    }];
     style_conditions.push("style".to_string());
 
     by_dependency.push((
@@ -1414,7 +1417,7 @@ fn get_resolve_defaults(
     extensions: Some(vec![]),
     alias_fields: Some(vec![]),
     exports_fields: Some(vec![vec!["exports".to_string()]]),
-    roots: Some(vec![context.to_string()]),
+    roots: Some(vec![]),
     main_fields: Some(vec!["main".to_string()]),
     imports_fields: Some(vec![vec!["imports".to_string()]]),
     by_dependency: Some(ByDependency::from_iter(by_dependency)),
@@ -1839,6 +1842,13 @@ impl ModuleOptionsBuilder {
   }
 }
 
+fn extension_rule(extension: &str) -> RuleSetCondition {
+  RuleSetCondition::Regexp(
+    RspackRegex::new(&format!("{}$", regex::escape(extension)))
+      .expect("should initialize default extension regex"),
+  )
+}
+
 fn default_rules(async_web_assembly: bool, css: bool) -> Vec<ModuleRule> {
   let mut rules = vec![
     // application/node
@@ -1852,14 +1862,7 @@ fn default_rules(async_web_assembly: bool, css: bool) -> Vec<ModuleRule> {
     },
     // .json
     ModuleRule {
-      test: Some(RuleSetCondition::Func(Box::new(|ctx| {
-        Box::pin(ready(Ok(
-          ctx
-            .as_str()
-            .map(|data| data.ends_with(".json"))
-            .unwrap_or_default(),
-        )))
-      }))),
+      test: Some(extension_rule(".json")),
       effect: ModuleRuleEffect {
         r#type: Some(ModuleType::Json),
         ..Default::default()
@@ -1877,14 +1880,7 @@ fn default_rules(async_web_assembly: bool, css: bool) -> Vec<ModuleRule> {
     },
     // .mjs
     ModuleRule {
-      test: Some(RuleSetCondition::Func(Box::new(|ctx| {
-        Box::pin(ready(Ok(
-          ctx
-            .as_str()
-            .map(|data| data.ends_with(".mjs"))
-            .unwrap_or_default(),
-        )))
-      }))),
+      test: Some(extension_rule(".mjs")),
       effect: ModuleRuleEffect {
         r#type: Some(ModuleType::JsEsm),
         resolve: Some(Resolve {
@@ -1903,14 +1899,7 @@ fn default_rules(async_web_assembly: bool, css: bool) -> Vec<ModuleRule> {
     },
     // .js with type:module
     ModuleRule {
-      test: Some(RuleSetCondition::Func(Box::new(|ctx| {
-        Box::pin(ready(Ok(
-          ctx
-            .as_str()
-            .map(|data| data.ends_with(".js"))
-            .unwrap_or_default(),
-        )))
-      }))),
+      test: Some(extension_rule(".js")),
       description_data: Some(HashMap::from_iter([(
         "type".into(),
         RuleSetCondition::String("module".into()).into(),
@@ -1933,14 +1922,7 @@ fn default_rules(async_web_assembly: bool, css: bool) -> Vec<ModuleRule> {
     },
     // .cjs
     ModuleRule {
-      test: Some(RuleSetCondition::Func(Box::new(|ctx| {
-        Box::pin(ready(Ok(
-          ctx
-            .as_str()
-            .map(|data| data.ends_with(".cjs"))
-            .unwrap_or_default(),
-        )))
-      }))),
+      test: Some(extension_rule(".cjs")),
       effect: ModuleRuleEffect {
         r#type: Some(ModuleType::JsDynamic),
         ..Default::default()
@@ -1949,14 +1931,7 @@ fn default_rules(async_web_assembly: bool, css: bool) -> Vec<ModuleRule> {
     },
     // .js with type:commonjs
     ModuleRule {
-      test: Some(RuleSetCondition::Func(Box::new(|ctx| {
-        Box::pin(ready(Ok(
-          ctx
-            .as_str()
-            .map(|data| data.ends_with(".js"))
-            .unwrap_or_default(),
-        )))
-      }))),
+      test: Some(extension_rule(".js")),
       description_data: Some(HashMap::from_iter([(
         "type".into(),
         RuleSetCondition::String("commonjs".into()).into(),
@@ -1970,13 +1945,14 @@ fn default_rules(async_web_assembly: bool, css: bool) -> Vec<ModuleRule> {
     // text/javascript or application/javascript
     ModuleRule {
       mimetype: Some(
-        RuleSetCondition::Logical(Box::new(RuleSetLogicalConditions {
-          or: Some(vec![
+        RuleSetCondition::Logical(Box::new(RuleSetLogicalConditions::new(
+          None,
+          Some(vec![
             RuleSetCondition::String("text/javascript".into()),
             RuleSetCondition::String("application/javascript".into()),
           ]),
-          ..Default::default()
-        }))
+          None,
+        )))
         .into(),
       ),
       effect: ModuleRuleEffect {
@@ -2001,14 +1977,7 @@ fn default_rules(async_web_assembly: bool, css: bool) -> Vec<ModuleRule> {
   if async_web_assembly {
     rules.extend(vec![
       ModuleRule {
-        test: Some(RuleSetCondition::Func(Box::new(|ctx| {
-          Box::pin(ready(Ok(
-            ctx
-              .as_str()
-              .map(|data| data.ends_with(".wasm"))
-              .unwrap_or_default(),
-          )))
-        }))),
+        test: Some(extension_rule(".wasm")),
         effect: ModuleRuleEffect {
           r#type: Some(ModuleType::WasmAsync),
           ..Default::default()
@@ -2064,14 +2033,7 @@ fn default_rules(async_web_assembly: bool, css: bool) -> Vec<ModuleRule> {
 
     rules.extend(vec![
       ModuleRule {
-        test: Some(RuleSetCondition::Func(Box::new(|ctx| {
-          Box::pin(ready(Ok(
-            ctx
-              .as_str()
-              .map(|data| data.ends_with(".css"))
-              .unwrap_or_default(),
-          )))
-        }))),
+        test: Some(extension_rule(".css")),
         effect: ModuleRuleEffect {
           r#type: Some(ModuleType::CssAuto),
           resolve: Some(resolve.clone()),
@@ -2662,7 +2624,7 @@ impl OutputOptionsBuilder {
     target_properties: Option<&TargetProperties>,
     is_affected_by_browserslist: bool,
     development: bool,
-    entry: &IndexMap<String, EntryDescription>,
+    entry: &FxIndexMap<String, EntryDescription>,
     _future_defaults: bool,
   ) -> Result<OutputOptions> {
     let tp = target_properties;
@@ -3206,8 +3168,6 @@ impl OutputOptionsBuilder {
 /// [`OptimizationOptions`]: rspack_core::options::Optimization
 #[derive(Debug, Default)]
 pub struct OptimizationOptionsBuilder {
-  /// Detect and remove modules from chunks these modules are already included in all parents.
-  remove_available_modules: Option<bool>,
   /// Remove empty chunks generated in the compilation.
   remove_empty_chunks: Option<bool>,
   /// Merge chunks which contain the same modules.
@@ -3250,7 +3210,6 @@ pub struct OptimizationOptionsBuilder {
 impl From<Optimization> for OptimizationOptionsBuilder {
   fn from(value: Optimization) -> Self {
     OptimizationOptionsBuilder {
-      remove_available_modules: Some(value.remove_available_modules),
       side_effects: Some(value.side_effects),
       provided_exports: Some(value.provided_exports),
       used_exports: Some(value.used_exports),
@@ -3276,7 +3235,6 @@ impl From<Optimization> for OptimizationOptionsBuilder {
 impl From<&mut OptimizationOptionsBuilder> for OptimizationOptionsBuilder {
   fn from(value: &mut OptimizationOptionsBuilder) -> Self {
     OptimizationOptionsBuilder {
-      remove_available_modules: value.remove_available_modules.take(),
       remove_empty_chunks: value.remove_empty_chunks.take(),
       merge_duplicate_chunks: value.merge_duplicate_chunks.take(),
       module_ids: value.module_ids.take(),
@@ -3300,12 +3258,6 @@ impl From<&mut OptimizationOptionsBuilder> for OptimizationOptionsBuilder {
 }
 
 impl OptimizationOptionsBuilder {
-  /// Set whether to detect and remove modules from chunks these modules are already included in all parents.
-  pub fn remove_available_modules(&mut self, value: bool) -> &mut Self {
-    self.remove_available_modules = Some(value);
-    self
-  }
-
   /// Set whether to remove empty chunks generated in the compilation.
   pub fn remove_empty_chunks(&mut self, value: bool) -> &mut Self {
     self.remove_empty_chunks = Some(value);
@@ -3457,9 +3409,8 @@ impl OptimizationOptionsBuilder {
     builder_context: &mut BuilderContext,
     development: bool,
     production: bool,
-    _css: bool,
+    experiments: &Experiments,
   ) -> Result<Optimization> {
-    let remove_available_modules = d!(self.remove_available_modules, false);
     let remove_empty_chunks = d!(self.remove_empty_chunks, true);
     if remove_empty_chunks {
       builder_context
@@ -3504,6 +3455,12 @@ impl OptimizationOptionsBuilder {
           .plugins
           .push(BuiltinPluginOptions::NaturalModuleIdsPlugin);
       }
+      "hashed" => {
+        builder_context
+          .plugins
+          .push(BuiltinPluginOptions::HashedModuleIdsPlugin);
+      }
+      "false" => {}
       _ => {
         return Err(
           BuilderError::Option(
@@ -3581,7 +3538,9 @@ impl OptimizationOptionsBuilder {
     if side_effects.is_enable() {
       builder_context
         .plugins
-        .push(BuiltinPluginOptions::SideEffectsFlagPlugin);
+        .push(BuiltinPluginOptions::SideEffectsFlagPlugin(
+          experiments.pure_functions,
+        ));
     }
 
     let inline_exports = d!(self.inline_exports, production);
@@ -3682,7 +3641,6 @@ impl OptimizationOptionsBuilder {
     }
 
     Ok(Optimization {
-      remove_available_modules,
       side_effects,
       provided_exports,
       used_exports,
@@ -3708,6 +3666,7 @@ pub struct ExperimentsBuilder {
   /// Whether to enable async web assembly.
   async_web_assembly: Option<bool>,
   // TODO: lazy compilation
+  pure_functions: Option<bool>,
 }
 
 impl From<Experiments> for ExperimentsBuilder {
@@ -3716,6 +3675,7 @@ impl From<Experiments> for ExperimentsBuilder {
       future_defaults: None,
       css: Some(value.css),
       async_web_assembly: None,
+      pure_functions: Some(value.pure_functions),
     }
   }
 }
@@ -3726,6 +3686,7 @@ impl From<&mut ExperimentsBuilder> for ExperimentsBuilder {
       future_defaults: value.future_defaults.take(),
       css: value.css.take(),
       async_web_assembly: value.async_web_assembly.take(),
+      pure_functions: value.pure_functions.take(),
     }
   }
 }
@@ -3766,6 +3727,7 @@ impl ExperimentsBuilder {
     Ok(Experiments {
       css: d!(self.css, false),
       defer_import: false,
+      pure_functions: d!(self.pure_functions, false),
     })
   }
 }
@@ -3816,6 +3778,30 @@ mod test {
 
       let plugins = context.take_plugins(&compiler_options);
       assert!(!plugins.is_empty());
+    })
+  }
+
+  #[test]
+  fn side_effects_flag_plugin_respects_pure_functions() {
+    within_compiler_context_for_testing_sync(|| {
+      let mut context: BuilderContext = Default::default();
+      let compiler_options = CompilerOptions::builder()
+        .mode(Mode::Production)
+        .target(vec!["web".to_string()])
+        .experiments(ExperimentsBuilder {
+          pure_functions: Some(true),
+          ..Default::default()
+        })
+        .build(&mut context)
+        .unwrap();
+
+      assert!(compiler_options.experiments.pure_functions);
+      assert!(
+        context
+          .plugins
+          .iter()
+          .any(|plugin| matches!(plugin, BuiltinPluginOptions::SideEffectsFlagPlugin(true)))
+      );
     })
   }
 

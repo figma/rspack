@@ -1,7 +1,7 @@
 #![allow(clippy::unwrap_used)]
-use std::sync::Arc;
+use std::{cell::RefCell, sync::Arc};
 
-use criterion::criterion_group;
+use criterion::BatchSize;
 use rspack::builder::Builder as _;
 use rspack_benchmark::Criterion;
 use rspack_core::{
@@ -13,7 +13,8 @@ use rspack_core::{
 use rspack_error::Diagnostic;
 use rspack_fs::{MemoryFileSystem, WritableFileSystem};
 use rspack_tasks::{CURRENT_COMPILER_CONTEXT, within_compiler_context_for_testing_sync};
-use tokio::runtime::Builder;
+
+use crate::groups::diagnostics::assert_no_compilation_errors;
 
 pub(crate) static NUM_MODULES: usize = 10000;
 
@@ -103,9 +104,7 @@ pub fn build_chunk_graph_benchmark(c: &mut Criterion) {
   })
 }
 pub fn build_chunk_graph_benchmark_inner(c: &mut Criterion) {
-  let rt = Builder::new_multi_thread()
-    .build()
-    .expect("should not fail to build tokio runtime");
+  let rt = rspack_benchmark::build_tokio_rt();
   let _guard = rt.enter();
 
   let fs = Arc::new(MemoryFileSystem::default());
@@ -117,7 +116,7 @@ pub fn build_chunk_graph_benchmark_inner(c: &mut Criterion) {
     .entry("main", "/src/dynamic-0.js")
     .input_filesystem(fs.clone())
     .output_filesystem(fs.clone())
-    .optimization(Optimization::builder().remove_available_modules(true))
+    .optimization(Optimization::builder())
     .incremental(IncrementalOptions::empty_passes())
     .build()
     .unwrap();
@@ -194,13 +193,19 @@ pub fn build_chunk_graph_benchmark_inner(c: &mut Criterion) {
     compiler.compilation.exports_info_artifact = exports_info_artifact.into();
   });
 
-  assert!(compiler.compilation.get_errors().next().is_none());
+  assert_no_compilation_errors(&compiler.compilation, "build_chunk_graph benchmark setup");
+  let compiler = RefCell::new(compiler);
 
   c.bench_function("rust@build_chunk_graph", |b| {
-    b.iter_with_setup_wrapper(|runner| {
-      reset_chunk_graph_state(&mut compiler.compilation);
-      runner.run(|| {
+    b.iter_batched_ref(
+      || {
+        let mut compiler = compiler.borrow_mut();
+        reset_chunk_graph_state(&mut compiler.compilation);
+      },
+      |_| {
+        let mut compiler = compiler.borrow_mut();
         build_chunk_graph::build_chunk_graph(&mut compiler.compilation).unwrap();
+        assert_no_compilation_errors(&compiler.compilation, "build_chunk_graph benchmark pass");
         assert_eq!(
           compiler
             .compilation
@@ -209,8 +214,9 @@ pub fn build_chunk_graph_benchmark_inner(c: &mut Criterion) {
             .len(),
           NUM_MODULES / 10
         );
-      });
-    });
+      },
+      BatchSize::PerIteration,
+    );
   });
 }
 
@@ -221,21 +227,19 @@ pub fn build_module_graph_benchmark(c: &mut Criterion) {
 }
 
 pub fn build_module_graph_benchmark_inner(c: &mut Criterion) {
-  let rt = Builder::new_multi_thread()
-    .build()
-    .expect("should not fail to build tokio runtime");
+  let rt = rspack_benchmark::build_tokio_rt();
   let _guard = rt.enter();
 
   let fs = Arc::new(MemoryFileSystem::default());
   let random_table =
     serde_json::from_str::<Vec<Vec<usize>>>(include_str!("../build_chunk_graph/random_table.json"))
       .expect("should not fail to parse random table json");
-  let mut compiler = Compiler::builder()
+  let compiler = Compiler::builder()
     .context("/")
     .entry("main", "/src/dynamic-0.js")
     .input_filesystem(fs.clone())
     .output_filesystem(fs.clone())
-    .optimization(Optimization::builder().remove_available_modules(true))
+    .optimization(Optimization::builder())
     .incremental(IncrementalOptions::empty_passes())
     .build()
     .unwrap();
@@ -246,62 +250,54 @@ pub fn build_module_graph_benchmark_inner(c: &mut Criterion) {
       .expect("should not fail to create dir");
     prepare_large_code_splitting_case(NUM_MODULES, &random_table, &fs).await;
   });
+  let compiler = RefCell::new(compiler);
 
   c.bench_function("rust@build_module_graph", |b| {
-    b.iter_with_setup_wrapper(|runner| {
-      reset_compilation_state(&mut compiler);
-      rt.block_on(async {
-        let mut compilation_params = compiler.new_compilation_params();
-        compiler
-          .plugin_driver
-          .compiler_hooks
-          .this_compilation
-          .call(&mut compiler.compilation, &mut compilation_params)
-          .await
-          .unwrap();
-        compiler
-          .plugin_driver
-          .compiler_hooks
-          .compilation
-          .call(&mut compiler.compilation, &mut compilation_params)
-          .await
-          .unwrap();
-        compiler
-          .plugin_driver
-          .compiler_hooks
-          .make
-          .call(&mut compiler.compilation)
-          .await
-          .unwrap();
-      });
-      assert!(
-        compiler.compilation.get_errors().next().is_none(),
-        "build_module_graph benchmark setup should not produce compilation errors"
-      );
-      runner.run(|| {
+    b.iter_batched_ref(
+      || {
+        let mut compiler = compiler.borrow_mut();
+        reset_compilation_state(&mut compiler);
+        let plugin_driver = compiler.plugin_driver.clone();
+        rt.block_on(async {
+          let mut compilation_params = compiler.new_compilation_params();
+          plugin_driver
+            .compiler_hooks
+            .this_compilation
+            .call(&mut compiler.compilation, &mut compilation_params)
+            .await
+            .unwrap();
+          plugin_driver
+            .compiler_hooks
+            .compilation
+            .call(&mut compiler.compilation, &mut compilation_params)
+            .await
+            .unwrap();
+          plugin_driver
+            .compiler_hooks
+            .make
+            .call(&mut compiler.compilation)
+            .await
+            .unwrap();
+        });
+        assert_no_compilation_errors(&compiler.compilation, "build_module_graph benchmark setup");
+      },
+      |_| {
+        let mut compiler = compiler.borrow_mut();
         rt.block_on(async {
           build_module_graph_pass(&mut compiler.compilation)
             .await
             .unwrap();
         });
-        assert!(
-          compiler.compilation.get_errors().next().is_none(),
-          "build_module_graph benchmark pass should not produce compilation errors"
-        );
+        assert_no_compilation_errors(&compiler.compilation, "build_module_graph benchmark pass");
         assert_eq!(
           compiler.compilation.get_module_graph().modules_len(),
           NUM_MODULES + NUM_MODULES / 10
         );
-      });
-    });
+      },
+      BatchSize::PerIteration,
+    );
   });
 }
-
-criterion_group!(
-  chunk_graph,
-  build_chunk_graph_benchmark,
-  build_module_graph_benchmark
-);
 
 fn reset_chunk_graph_state(compilation: &mut Compilation) {
   compilation.build_chunk_graph_artifact.chunk_by_ukey = Default::default();
@@ -332,6 +328,7 @@ fn reset_compilation_state(compiler: &mut Compiler) {
       None,
       Incremental::new_cold(compiler.options.incremental),
       Some(Default::default()),
+      Default::default(),
       Default::default(),
       Default::default(),
       compiler.input_filesystem.clone(),

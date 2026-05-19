@@ -20,6 +20,7 @@ pub use options::{
   ManifestExposeOption, ManifestSharedOption, ModuleFederationManifestPluginOptions,
   RemoteAliasTarget,
 };
+use rspack_collections::IdentifierSet;
 use rspack_core::{
   Compilation, CompilationAsset, CompilationProcessAssets, ModuleIdentifier, ModuleType, Plugin,
   PublicPath,
@@ -226,7 +227,7 @@ async fn process_assets(&self, compilation: &mut Compilation) -> Result<()> {
     let mut expose_chunk_names: HashMap<String, String> = HashMap::default();
     let mut shared_map: HashMap<String, StatsShared> = HashMap::default();
     let mut shared_usage_links: Vec<(String, String)> = Vec::new();
-    let mut shared_module_targets: HashMap<String, HashSet<ModuleIdentifier>> = HashMap::default();
+    let mut shared_module_targets: HashMap<String, IdentifierSet> = HashMap::default();
     let mut module_ids_by_name: HashMap<String, ModuleIdentifier> = HashMap::default();
     let mut remote_module_ids: Vec<ModuleIdentifier> = Vec::new();
     let mut container_entry_module: Option<ModuleIdentifier> = None;
@@ -360,7 +361,7 @@ async fn process_assets(&self, compilation: &mut Compilation) -> Result<()> {
       if matches!(module_type, ModuleType::ConsumeShared)
         && let Some((pkg, required)) = parse_consume_shared_identifier(&identifier)
       {
-        let mut target_ids: HashSet<ModuleIdentifier> = HashSet::default();
+        let mut target_ids: IdentifierSet = IdentifierSet::default();
         for connection in module_graph.get_outgoing_connections(&module_identifier) {
           let module_id = *connection.module_identifier();
           if should_collect_module(&module_id) {
@@ -374,7 +375,7 @@ async fn process_assets(&self, compilation: &mut Compilation) -> Result<()> {
         shared_module_targets
           .entry(pkg.clone())
           .or_default()
-          .extend(target_ids.into_iter());
+          .extend(target_ids);
         let entry = ensure_shared_entry(&mut shared_map, &container_name, &pkg);
         if entry.requiredVersion.is_none() && required.is_some() {
           entry.requiredVersion = required;

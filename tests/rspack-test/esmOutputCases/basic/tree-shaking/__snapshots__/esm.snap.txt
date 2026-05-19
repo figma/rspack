@@ -1,6 +1,7 @@
 ```mjs title=main.mjs
-import * as __rspack_external_fs from "fs";
 import { __webpack_require__ } from "./runtime.mjs";
+
+import * as __rspack_external_fs from "fs";
 __webpack_require__.add({
 "./cjs.js"
 /*!****************!*\
@@ -56,6 +57,7 @@ module.exports = __rspack_external_fs;
 });
 __webpack_require__("./index.js");
 
+export {};
 
 ```
 

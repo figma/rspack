@@ -25,6 +25,7 @@ mod process_assets;
 mod run_passes;
 mod runtime_requirements;
 mod seal;
+
 use std::{
   collections::{VecDeque, hash_map},
   fmt::{self, Debug},
@@ -38,16 +39,13 @@ use std::{
 
 use dashmap::DashSet;
 use futures::future::BoxFuture;
-use indexmap::IndexMap;
 use itertools::Itertools;
 use rayon::prelude::*;
 use rspack_cacheable::{
   cacheable,
   with::{AsOption, AsPreset},
 };
-use rspack_collections::{
-  DatabaseItem, IdentifierDashMap, IdentifierMap, IdentifierSet, UkeyMap, UkeySet,
-};
+use rspack_collections::{IdentifierDashMap, IdentifierMap, IdentifierSet};
 use rspack_error::{Diagnostic, Result, ToStringResultToRspackResultExt};
 use rspack_fs::{IntermediateFileSystem, ReadableFileSystem, WritableFileSystem};
 use rspack_hash::{RspackHash, RspackHashDigest};
@@ -57,11 +55,19 @@ use rspack_sources::BoxSource;
 use rspack_tasks::CompilerContext;
 #[cfg(allocative)]
 use rspack_util::allocative;
-use rspack_util::{itoa, tracing_preset::TRACING_BENCH_TARGET};
+use rspack_util::{fx_hash::FxIndexMap, itoa, tracing_preset::TRACING_BENCH_TARGET};
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet, FxHasher};
 use tracing::instrument;
 use ustr::Ustr;
 
+#[cfg(feature = "codspeed")]
+pub use self::{
+  assign_runtime_ids::AssignRuntimeIdsPass, code_generation::CodeGenerationPass,
+  create_chunk_assets::CreateChunkAssetsPass, create_hash::CreateHashPass,
+  create_module_assets::CreateModuleAssetsPass, create_module_hashes::CreateModuleHashesPass,
+  optimize_code_generation::OptimizeCodeGenerationPass, process_assets::ProcessAssetsPass,
+  runtime_requirements::RuntimeRequirementsPass,
+};
 use crate::{
   AsyncModulesArtifact, BindingCell, BoxDependency, BoxModule, BuildChunkGraphArtifact, CacheCount,
   CacheOptions, CgcRuntimeRequirementsArtifact, CgmHashArtifact, CgmRuntimeRequirementsArtifact,
@@ -77,7 +83,9 @@ use crate::{
   ModuleGraphCacheArtifact, ModuleIdentifier, ModuleIdsArtifact, ModuleStaticCache, PathData,
   ProcessRuntimeRequirementsCacheArtifact, ResolverFactory, RuntimeGlobals, RuntimeKeyMap,
   RuntimeMode, RuntimeModule, RuntimeSpec, RuntimeSpecMap, RuntimeTemplate, SharedPluginDriver,
-  SideEffectsOptimizeArtifact, SourceType, Stats, StatsContext, StealCell, ValueCacheVersions,
+  SideEffectsOptimizeArtifact, SideEffectsStateArtifact, SourceType, Stats, StatsContext,
+  StealCell, ValueCacheVersions,
+  cache::persistent::occasion::minimize::MinimizePersistentCacheArtifact,
   compilation::build_module_graph::{
     BuildModuleGraphArtifact, ModuleExecutor, UpdateParam, update_module_graph,
   },
@@ -94,7 +102,7 @@ define_hook!(CompilationStillValidModule: Series(compiler_id: CompilerId, compil
 define_hook!(CompilationSucceedModule: Series(compiler_id: CompilerId, compilation_id: CompilationId, module: &mut BoxModule),tracing=false);
 define_hook!(CompilationExecuteModule:
   Series(module: &ModuleIdentifier, runtime_modules: &IdentifierSet, code_generation_results: &BindingCell<CodeGenerationResults>, execute_module_id: &ExecuteModuleId));
-define_hook!(CompilationFinishModules: Series(compilation: &Compilation, async_modules_artifact: &mut AsyncModulesArtifact, exports_info_artifact: &mut ExportsInfoArtifact));
+define_hook!(CompilationFinishModules: Series(compilation: &Compilation, async_modules_artifact: &mut AsyncModulesArtifact, exports_info_artifact: &mut ExportsInfoArtifact, side_effects_state_artifact: &mut SideEffectsStateArtifact));
 define_hook!(CompilationSeal: Series(compilation: &Compilation, diagnostics: &mut Vec<Diagnostic>));
 define_hook!(CompilationDependencyReferencedExports: Sync(
   compilation: &Compilation,
@@ -204,7 +212,7 @@ pub struct Compilation {
   // The status is different, should generate different hash for `.hot-update.js`
   // So use compilation hash update `hot_index` to fix it.
   pub hot_index: u32,
-  pub records: Option<CompilationRecords>,
+  pub records: Option<Arc<CompilationRecords>>,
   pub options: Arc<CompilerOptions>,
   pub platform: Arc<CompilerPlatform>,
   pub entries: Entry,
@@ -261,6 +269,8 @@ pub struct Compilation {
   pub process_runtime_requirements_cache_artifact:
     StealCell<ProcessRuntimeRequirementsCacheArtifact>,
   pub imported_by_defer_modules_artifact: StealCell<ImportedByDeferModulesArtifact>,
+
+  pub minimize_persistent_cache_artifact: Option<MinimizePersistentCacheArtifact>,
 
   pub code_generated_modules: IdentifierSet,
   pub build_time_executed_modules: IdentifierSet,
@@ -328,9 +338,10 @@ impl Compilation {
     buildtime_plugin_driver: SharedPluginDriver,
     resolver_factory: Arc<ResolverFactory>,
     loader_resolver_factory: Arc<ResolverFactory>,
-    records: Option<CompilationRecords>,
+    records: Option<Arc<CompilationRecords>>,
     incremental: Incremental,
     module_executor: Option<ModuleExecutor>,
+    logging: CompilationLogging,
     modified_files: ArcPathSet,
     removed_files: ArcPathSet,
     input_filesystem: Arc<dyn ReadableFileSystem>,
@@ -358,7 +369,7 @@ impl Compilation {
       assets_related_in: Default::default(),
       emitted_assets: Default::default(),
       diagnostics: Default::default(),
-      logging: Default::default(),
+      logging,
       plugin_driver,
       buildtime_plugin_driver,
       resolver_factory,
@@ -391,6 +402,7 @@ impl Compilation {
       process_runtime_requirements_cache_artifact: StealCell::new(
         ProcessRuntimeRequirementsCacheArtifact::new(&options),
       ),
+      minimize_persistent_cache_artifact: None,
       build_time_executed_modules: Default::default(),
       incremental,
       build_chunk_graph_artifact: Default::default(),
@@ -919,7 +931,7 @@ impl Compilation {
     &mut self.assets
   }
 
-  pub fn entrypoints(&self) -> &IndexMap<String, ChunkGroupUkey> {
+  pub fn entrypoints(&self) -> &FxIndexMap<String, ChunkGroupUkey> {
     &self.build_chunk_graph_artifact.entrypoints
   }
 
@@ -1449,9 +1461,12 @@ pub fn assign_depths<'a>(
   assign_map: &mut IdentifierMap<usize>,
   modules: impl Iterator<Item = &'a ModuleIdentifier>,
   outgoings: &IdentifierMap<Vec<ModuleIdentifier>>,
+  initial_queue_capacity: usize,
 ) {
   // https://github.com/webpack/webpack/blob/1f99ad6367f2b8a6ef17cce0e058f7a67fb7db18/lib/Compilation.js#L3720
-  let mut q = VecDeque::new();
+  let (module_count_lower_bound, module_count_upper_bound) = modules.size_hint();
+  let module_count = module_count_upper_bound.unwrap_or(module_count_lower_bound);
+  let mut q = VecDeque::with_capacity(initial_queue_capacity.max(module_count));
   for item in modules {
     q.push_back((*item, 0));
   }
@@ -1464,8 +1479,10 @@ pub fn assign_depths<'a>(
         vac.insert(depth);
       }
     };
-    for con in outgoings.get(&id).expect("should have outgoings").iter() {
-      q.push_back((*con, depth + 1));
+    if let Some(outgoing_modules) = outgoings.get(&id) {
+      for con in outgoing_modules {
+        q.push_back((*con, depth + 1));
+      }
     }
   }
 }

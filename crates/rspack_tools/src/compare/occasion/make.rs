@@ -1,11 +1,14 @@
 use std::sync::Arc;
 
-use rspack_collections::UkeyMap;
 pub use rspack_core::cache::persistent::occasion::make::SCOPE;
 use rspack_core::{
   DependencyId,
   build_module_graph::BuildModuleGraphArtifact,
-  cache::persistent::{codec::CacheCodec, occasion::make::MakeOccasion, storage::Storage},
+  cache::persistent::{
+    codec::CacheCodec,
+    occasion::{Occasion, make::MakeOccasion},
+    storage::Storage,
+  },
 };
 use rspack_error::Result;
 use rspack_paths::Utf8PathBuf;
@@ -15,8 +18,8 @@ use crate::{debug_info::DebugInfo, utils::ensure_iter_equal};
 
 /// Compare make scope data between two storages
 pub async fn compare(
-  storage1: Arc<dyn Storage>,
-  storage2: Arc<dyn Storage>,
+  storage1: &dyn Storage,
+  storage2: &dyn Storage,
   debug_info: DebugInfo,
 ) -> Result<()> {
   // Load make data from both storages
@@ -33,11 +36,11 @@ pub async fn compare(
   // Convert stored data to BuildModuleGraphArtifact using MakeOccasion's recovery ability
   // Use a dummy path for codec since we're only deserializing
   let codec = Arc::new(CacheCodec::new(Some(Utf8PathBuf::from("/"))));
-  let occasion1 = MakeOccasion::new(storage1.clone(), codec.clone());
-  let occasion2 = MakeOccasion::new(storage2.clone(), codec.clone());
+  let occasion1 = MakeOccasion::new(codec.clone());
+  let occasion2 = MakeOccasion::new(codec.clone());
 
-  let artifact1 = occasion1.recovery().await?;
-  let artifact2 = occasion2.recovery().await?;
+  let artifact1 = occasion1.recovery(storage1).await?;
+  let artifact2 = occasion2.recovery(storage2).await?;
 
   let comparator = ArtifactComparator::new(&artifact1, &artifact2);
   comparator.compare(&debug_info)?;
@@ -82,7 +85,7 @@ impl<'a> ArtifactComparator<'a> {
 
     // First pass: Compare dependencies and build DependencyId mapping
     // DependencyId mapping: dep_id1 -> dep_id2
-    let mut dep_id_map: UkeyMap<DependencyId, DependencyId> = UkeyMap::default();
+    let mut dep_id_map: HashMap<DependencyId, DependencyId> = HashMap::default();
 
     for (module_id, module1) in &modules1 {
       let module2 = modules2
@@ -120,7 +123,7 @@ impl<'a> ArtifactComparator<'a> {
     &self,
     module_id: &rspack_core::ModuleIdentifier,
     debug_info: &DebugInfo,
-    dep_id_map: &UkeyMap<DependencyId, DependencyId>,
+    dep_id_map: &HashMap<DependencyId, DependencyId>,
   ) -> Result<()> {
     // Get outgoing connections for this module from both graphs
     let connections1: Vec<_> = self.mg1.get_outgoing_connections(module_id).collect();
@@ -179,7 +182,7 @@ impl<'a> ArtifactComparator<'a> {
     module1: &rspack_core::BoxModule,
     module2: &rspack_core::BoxModule,
     debug_info: &DebugInfo,
-    dep_id_map: &mut UkeyMap<DependencyId, DependencyId>,
+    dep_id_map: &mut HashMap<DependencyId, DependencyId>,
   ) -> Result<()> {
     let deps1 = module1.get_dependencies();
     let deps2 = module2.get_dependencies();
@@ -230,7 +233,7 @@ impl<'a> ArtifactComparator<'a> {
     module1: &rspack_core::BoxModule,
     module2: &rspack_core::BoxModule,
     debug_info: &DebugInfo,
-    dep_id_map: &UkeyMap<DependencyId, DependencyId>,
+    dep_id_map: &HashMap<DependencyId, DependencyId>,
   ) -> Result<()> {
     let build_info1 = module1.build_info();
     let build_info2 = module2.build_info();
@@ -273,7 +276,7 @@ impl<'a> ArtifactComparator<'a> {
     &self,
     exports1: &[DependencyId],
     exports2: &[DependencyId],
-    dep_id_map: &UkeyMap<DependencyId, DependencyId>,
+    dep_id_map: &HashMap<DependencyId, DependencyId>,
     debug_info: &DebugInfo,
   ) -> Result<()> {
     if exports1.len() != exports2.len() {

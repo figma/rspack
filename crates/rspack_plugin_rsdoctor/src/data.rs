@@ -1,5 +1,5 @@
 use rspack_collections::Identifier;
-use rspack_core::DependencyType;
+use rspack_core::{BuildMetaExportsType, DependencyType};
 use rustc_hash::FxHashSet as HashSet;
 
 pub type ConnectionUkey = i32;
@@ -60,6 +60,7 @@ pub struct RsdoctorModule {
   pub bailout_reason: HashSet<String>,
   pub side_effects: Option<bool>,
   pub side_effects_locations: Vec<RsdoctorSideEffectLocation>,
+  pub exports_type: BuildMetaExportsType,
 }
 
 #[derive(Debug, Default)]
@@ -185,10 +186,26 @@ pub struct RsdoctorSourcePosition {
 }
 
 #[derive(Debug, Default)]
+pub struct RsdoctorConnectionsOnlyImportConnection {
+  pub origin_module: Option<ModuleUkey>,
+  pub dependency_type: String,
+  pub user_request: String,
+  pub active: bool,
+}
+
+#[derive(Debug, Default)]
+pub struct RsdoctorConnectionsOnlyImport {
+  pub module_ukey: ModuleUkey,
+  pub module_path: String,
+  pub connections: Vec<RsdoctorConnectionsOnlyImportConnection>,
+}
+
+#[derive(Debug, Default)]
 pub struct RsdoctorModuleGraph {
   pub modules: Vec<RsdoctorModule>,
   pub dependencies: Vec<RsdoctorDependency>,
   pub chunk_modules: Vec<RsdoctorChunkModules>,
+  pub connections_only_imports: Vec<RsdoctorConnectionsOnlyImport>,
 }
 
 #[derive(Debug, Default)]
